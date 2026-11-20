@@ -1,0 +1,16 @@
+timezone = "Europe/Moscow"
+
+[[targets]]
+slug = "project"
+name = "Учебный проект"
+kind = "project"
+
+[[targets]]
+slug = "issue-a"
+name = "Задача A"
+kind = "issue"
+
+[[targets]]
+slug = "issue-b"
+name = "Задача B"
+kind = "issue"

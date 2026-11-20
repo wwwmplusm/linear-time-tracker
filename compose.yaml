@@ -1,0 +1,35 @@
+services:
+  tracker:
+    build: .
+    restart: unless-stopped
+    environment:
+      TRACKER_PASSWORD: ${TRACKER_PASSWORD:?Set TRACKER_PASSWORD in .env}
+      TRACKER_DB: /var/lib/tracker/tracker.sqlite3
+      TRACKER_CONFIG: /etc/tracker/targets.toml
+      TRACKER_SECURE_COOKIE: "1"
+      LINEAR_CLIENT_ID: ${LINEAR_CLIENT_ID:-}
+      LINEAR_CLIENT_SECRET: ${LINEAR_CLIENT_SECRET:-}
+      LINEAR_REDIRECT_URI: ${LINEAR_REDIRECT_URI:-}
+      LINEAR_TRACKER_ORIGIN: ${LINEAR_TRACKER_ORIGIN:-}
+    volumes:
+      - tracker_data:/var/lib/tracker
+      - ./targets.toml:/etc/tracker/targets.toml:ro
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - tracker
+    environment:
+      TRACKER_DOMAIN: ${TRACKER_DOMAIN:?Set TRACKER_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  tracker_data:
+  caddy_data:
+  caddy_config:

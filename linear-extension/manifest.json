@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Личный таймер для Linear",
+  "version": "1.2.0",
+  "description": "Запуск, пауза, остановка и журнал таймеров на страницах проектов и задач Linear.",
+  "icons": {"128": "assets/timer-mark.png"},
+  "permissions": ["storage"],
+  "host_permissions": ["https://linear.app/*", "http://localhost/*"],
+  "optional_host_permissions": ["https://*/*"],
+  "background": {"service_worker": "worker.js"},
+  "options_ui": {"page": "settings.html", "open_in_tab": false},
+  "content_scripts": [
+    {"matches": ["https://linear.app/*"], "js": ["linear-page.js"], "run_at": "document_idle"}
+  ],
+  "web_accessible_resources": [
+    {"resources": ["panel.html"], "matches": ["https://linear.app/*"]}
+  ]
+}

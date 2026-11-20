@@ -1,0 +1,65 @@
+{% from "timers.html" import target_name, timestamp, active_timers with context %}
+
+{% macro journal(title, rows, id, empty) -%}
+  <section aria-labelledby="{{ id }}" id="{{ id }}-journal" class="journal">
+    <h2 id="{{ id }}">{{ title }}</h2>
+    {% if rows %}
+    <ul class="entries">
+      {% for row in rows %}
+      <li class="entry">
+        <div class="entry-main">
+          {{ target_name(row.target) }}
+          {% set started = row.started_ms | local_time %}
+          {% set ended = row.ended_ms | local_time %}
+          <div class="muted entry-dates">{{ timestamp(row.started_ms, started) }} – {{ timestamp(row.ended_ms, ended, started.date() != ended.date()) }}</div>
+        </div>
+        <div class="journal-actions">
+          <span class="duration">{{ ((row | elapsed_ms(now)) if id == "personal" else (row.ended_ms - row.started_ms)) | clock }}</span>
+          {% if id == "personal" %}
+          {% set name = targets[row.target].name if row.target in targets else row.target %}
+          {% set open_timer = active | selectattr("target", "eq", row.target) | first | default(none) %}
+          {% if open_timer %}
+          <a class="quiet" href="#timer-{{ open_timer.id }}">К таймеру</a>
+          {% else %}
+          <form method="post" action="{{ target.url }}/history/{{ row.id }}/restart">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="key" value="{{ start_key }}">
+            <button class="quiet" type="submit" id="restart-{{ row.id }}" aria-label="Запустить снова «{{ name }}»">Запустить снова</button>
+          </form>
+          {% endif %}
+          {% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty">{{ empty }}</p>
+    {% endif %}
+  </section>
+{%- endmacro %}
+
+<div id="tracker-state" data-revision="{{ revision }}" data-now="{{ now }}" data-target="{{ target.url }}" data-state-url="{{ target.url }}/state">
+  {{ active_timers(target.url) }}
+  <section class="selected">
+    <div>
+      <p class="context">{{ "Проект" if target.kind == "project" else "Задача" }}</p>
+      <h1>{{ target.name }}</h1>
+    </div>
+    {% if running %}
+    <a class="running-label" id="target-action" href="#timer-{{ running.id }}">
+      <span class="status-dot" aria-hidden="true"></span>{{ "На паузе" if running.paused_ms is not none else "Таймер идёт" }}
+    </a>
+    {% else %}
+    <form method="post" action="{{ target.url }}/start">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="key" value="{{ start_key }}">
+      <button class="primary" id="target-action" type="submit"><span class="icon icon-play" aria-hidden="true"></span>Запустить</button>
+    </form>
+    {% endif %}
+  </section>
+
+  <div class="journals" role="group" aria-label="Журнал. Часовой пояс {{ timezone }}">
+    {{ journal("Личное время", personal, "personal", "Нет завершённых интервалов") }}
+    {{ journal("Запуски агентов", agents, "agents", "Нет записей о запусках") }}
+  </div>
+</div>

@@ -1,0 +1,54 @@
+{% macro target_name(slug) -%}
+  {% if slug in targets %}
+  <a href="{{ targets[slug].url }}">{{ targets[slug].name }}</a>
+  {% else %}
+  {{ slug }}
+  {% endif %}
+{%- endmacro %}
+
+{% macro timestamp(ms, local, show_date=true) -%}
+  <time datetime="{{ ms | utc }}">{{ local.strftime("%d.%m.%Y %H:%M:%S" if show_date else "%H:%M:%S") }}</time>
+{%- endmacro %}
+
+{% macro active_timers(base_url, query="") -%}
+<section class="active" aria-labelledby="active">
+    <div class="section-heading">
+      <h2 id="active">Активные таймеры</h2>
+      {% if active %}<span class="count">{{ active | length }}</span>{% endif %}
+    </div>
+    {% if active %}
+    <ul class="entries">
+      {% for row in active %}
+      {% set paused = row.paused_ms is not none %}
+      {% set action = "resume" if paused else "pause" %}
+      {% set name = targets[row.target].name if row.target in targets else row.target %}
+      <li class="entry active-entry" data-active-target="{{ row.target }}"{% if paused %} data-paused{% endif %}>
+        <span class="status-dot" aria-hidden="true"></span>
+        <div class="entry-main">
+          {{ target_name(row.target) }}
+          <div class="muted entry-dates">{% if paused %}На паузе · {% endif %}С {{ timestamp(row.started_ms, row.started_ms | local_time) }}</div>
+        </div>
+        <div class="timer-actions">
+          <span class="duration"{% if not paused %} data-start="{{ row | running_since }}" data-worked="{{ row.worked_ms or 0 }}"{% endif %}>{{ (row | elapsed_ms(now)) | clock }}</span>
+          <form method="post" action="{{ base_url }}/timers/{{ action }}/{{ row.id }}{{ query }}">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="version" value="{{ row.version }}">
+            <button type="submit" class="secondary timer-control" id="playback-{{ row.id }}" aria-label="{{ 'Продолжить' if paused else 'Приостановить' }} таймер «{{ name }}»">
+              <span class="icon {{ 'icon-play' if paused else 'icon-pause' }}" aria-hidden="true"></span><span class="control-caption">{{ "Продолжить" if paused else "Пауза" }}</span>
+            </button>
+          </form>
+          <form method="post" action="{{ base_url }}/stop/{{ row.id }}{{ query }}">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button class="secondary timer-control stop" id="timer-{{ row.id }}" type="submit" aria-label="Остановить таймер «{{ name }}»">
+              <span class="icon icon-stop" aria-hidden="true"></span><span class="control-caption">Остановить</span>
+            </button>
+          </form>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty">Нет запущенных таймеров</p>
+    {% endif %}
+  </section>
+{%- endmacro %}

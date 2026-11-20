@@ -1,0 +1,4 @@
+{% from "timers.html" import active_timers with context %}
+<div id="tracker-state" data-revision="{{ revision }}" data-now="{{ now }}" data-target="{{ selection.url }}" data-state-url="/linear/state{{ selection.query }}">
+  {{ active_timers("/linear", selection.query) }}
+</div>

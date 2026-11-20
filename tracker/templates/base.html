@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title or target.name }} · Таймер</title>
+  <link rel="icon" href="/static/assets/timer-mark.png" type="image/png">
+  <link rel="stylesheet" href="/static/assets/type.css">
+  <link rel="stylesheet" href="/static/tracker.css">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="/"><img src="/static/assets/timer-mark.png" width="24" height="24" alt="">Таймер</a>
+      {% if csrf %}
+      <div class="header-actions">
+        {% set running_count = active | selectattr("paused_ms", "none") | list | length %}
+        <a class="quiet timer-indicator" href="#active">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="timer-indicator-text">{% if active %}Идут {{ running_count }}{% if active | length > running_count %} · На паузе {{ active | length - running_count }}{% endif %}{% else %}Таймеры{% endif %}</span>
+        </a>
+        <form method="post" action="/logout">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="quiet" type="submit">Выйти</button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+  </header>
+  {% if csrf %}<div class="tracker-layout">{% include "sidebar.html" %}{% endif %}
+  <main class="{{ 'workspace' if csrf else 'page' }}">{% block content %}{% endblock %}</main>
+  {% if csrf %}</div>{% endif %}
+</body>
+</html>

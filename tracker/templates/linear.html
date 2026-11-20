@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block head %}<script src="/static/tracker.js" defer></script>{% endblock %}
+
+{% macro start_timer(kind, id, name, label="Запустить") %}
+  {% set slug = "linear-" ~ id %}
+  {% set running = active | selectattr("target", "eq", slug) | first | default(none) %}
+  <div class="linear-row-actions" data-linear-target="{{ slug }}">
+    <form method="post" action="/linear/targets/start{{ selection.query }}"{% if running %} hidden{% endif %}>
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="kind" value="{{ kind }}">
+      <input type="hidden" name="reference" value="{{ id }}">
+      <input type="hidden" name="key" value="{{ start_key }}">
+      <button class="secondary" type="submit" aria-label="Запустить таймер для «{{ name }}»">
+        <span class="icon icon-play" aria-hidden="true"></span>{{ label }}
+      </button>
+    </form>
+    <a class="running-label" href="/t/{{ slug }}" aria-label="Открыть активный таймер для «{{ name }}»"{% if not running %} hidden{% endif %}>
+      <span class="status-dot" aria-hidden="true"></span><span data-timer-state>{{ "На паузе" if running and running.paused_ms is not none else "Таймер идёт" }}</span>
+    </a>
+  </div>
+{% endmacro %}
+
+{% block content %}
+<p class="notice error" id="sync-error" role="status" hidden>Не удалось обновить таймеры. Повторим попытку.</p>
+{% include "linear-state.html" %}
+
+<section class="linear-intro">
+  {% if account_name %}
+    {% if selection.team %}
+    <nav class="linear-breadcrumb" aria-label="Разделы Linear">
+      <a href="/linear">Команды</a>
+      {% if selection.project and results %}
+      <a href="{{ team_url }}">{{ results.team }}</a>
+      {% endif %}
+    </nav>
+    {% endif %}
+    <div class="linear-title">
+      <h1>{{ results.project if results and selection.project else results.team if results and selection.team else "Команды Linear" }}</h1>
+      {% if results and selection.project and selection.project != "none" %}
+      {{ start_timer("project", selection.project, results.project, "Таймер проекта") }}
+      {% endif %}
+    </div>
+    {% if not selection.team %}
+    <p class="muted linear-account">
+      <span>{{ account_name }}</span>
+      <a href="/linear/authorize">Сменить подключение</a>
+    </p>
+    {% endif %}
+  {% else %}
+    <h1>Подключение Linear</h1>
+    <p class="linear-guide">Подключите Linear, чтобы учитывать время по задачам и проектам</p>
+    <a class="primary" href="/linear/authorize">Подключить Linear</a>
+  {% endif %}
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  {% if message %}<p class="muted" role="status">{{ message }}</p>{% endif %}
+</section>
+
+{% if browse_error %}
+<p class="error" role="alert">{{ browse_error }}</p>
+{% elif results %}
+<section class="linear-browser"{% if selection.team %} aria-labelledby="linear-list"{% else %} aria-label="Список команд"{% endif %}>
+  {% if selection.team %}<h2 id="linear-list">{{ "Задачи" if selection.project else "Проекты" }}</h2>{% endif %}
+  <form method="get" action="/linear" role="search" class="linear-search">
+    {% if selection.team %}<input type="hidden" name="team" value="{{ selection.team }}">{% endif %}
+    {% if selection.project %}<input type="hidden" name="project" value="{{ selection.project }}">{% endif %}
+    <input type="search" name="q" value="{{ selection.term }}" maxlength="100"
+      aria-label="{{ "Название задачи" if selection.project else "Название проекта" if selection.team else "Название команды" }}"
+      placeholder="{{ "Найти задачу" if selection.project else "Найти проект" if selection.team else "Найти команду" }}">
+    <button class="secondary" type="submit">Найти</button>
+    {% if selection.term %}<a class="quiet" href="{{ clear_url }}">Сбросить</a>{% endif %}
+  </form>
+
+  <ul class="entries">
+    {% for item in results.page.nodes %}
+      {% if selection.project %}
+      <li class="entry linear-entry">
+        <div class="entry-main">
+          {% if item.id in added %}<a href="{{ added[item.id] }}">{{ item.name }}</a>
+          {% else %}<p>{{ item.name }}</p>{% endif %}
+          <p class="muted">{{ item.identifier }}</p>
+        </div>
+        {{ start_timer("issue", item.id, item.name) }}
+      </li>
+      {% else %}
+      <li class="linear-choice">
+        {% if selection.team %}
+        <a href="{{ team_url }}&amp;project={{ item.id }}">
+          <span class="target-icon project" aria-hidden="true"></span><span>{{ item.name }}</span>
+        </a>
+        {% else %}
+        <a href="/linear?team={{ item.id }}">
+          <span class="target-icon team" aria-hidden="true"></span><span>{{ item.name }}</span>
+          <span class="muted linear-team-key">{{ item.key }}</span>
+        </a>
+        {% endif %}
+      </li>
+      {% endif %}
+    {% else %}
+      <li class="empty">{{ "Совпадений нет" if selection.term else "Нет задач" if selection.project else "Нет проектов" if selection.team else "Нет команд" }}</li>
+    {% endfor %}
+    {% if selection.team and not selection.project and not selection.term and not (selection.after or selection.before) %}
+    <li class="linear-choice">
+      <a href="{{ team_url }}&amp;project=none">
+        <span class="target-icon" aria-hidden="true"></span><span>Без проекта</span>
+      </a>
+    </li>
+    {% endif %}
+  </ul>
+  {% if previous_url or next_url %}
+  <nav class="linear-pages" aria-label="Страницы списка">
+    {% if previous_url %}<a class="quiet" href="{{ previous_url }}">Назад</a>{% endif %}
+    {% if next_url %}<a class="quiet" href="{{ next_url }}">Далее</a>{% endif %}
+  </nav>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if saved_targets %}
+<details class="linear-saved">
+  <summary>Таймеры из Linear</summary>
+  <ul class="entries">
+    {% for target, reference, target_id in saved_targets %}
+    <li class="entry linear-entry">
+      <div class="entry-main">
+        <a href="{{ target.url }}">{{ target.name }}</a>
+        <p class="muted">{{ "Проект" if target.kind == "project" else reference }}</p>
+      </div>
+      {% if account_name and tracker_origin %}
+      <form method="post" action="/linear/targets/{{ target_id }}/link{{ selection.query }}">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="quiet" type="submit">Добавить ссылку в Linear</button>
+      </form>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</details>
+{% endif %}
+{% endblock %}

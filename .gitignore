@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.vercel/
+data/
+*.sqlite3
+*.sqlite3-*
+targets.toml
+.venv/
+__pycache__/
+.pytest_cache/

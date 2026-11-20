@@ -1,0 +1,37 @@
+<nav class="target-nav" aria-label="Навигация">
+  <div class="targets">
+    {% if linear_enabled %}
+    <a href="/linear"{% if selection is defined and not selection.team %} aria-current="page"{% endif %}>
+      <span class="target-icon team" aria-hidden="true"></span><span class="target-name">Команды Linear</span>
+    </a>
+    {% endif %}
+    <a href="{{ journal_url }}#personal"><span class="target-icon project" aria-hidden="true"></span><span class="target-name">Журнал</span></a>
+    {% if menu_teams %}
+    <p class="nav-title">Команды</p>
+    {% for team in menu_teams %}
+    <a href="/linear?team={{ team.id }}"{% if team.id == selection.team %} aria-current="{{ 'true' if selection.project else 'page' }}"{% endif %}>
+      <span class="target-icon team" aria-hidden="true"></span><span class="target-name">{{ team.name }}</span>
+    </a>
+    {% endfor %}
+    {% endif %}
+    {% if selection is defined and selection.team %}
+    <p class="nav-title">Проекты</p>
+    {% for project in menu_projects %}
+    <a href="{{ team_url }}&amp;project={{ project.id }}"{% if project.id == selection.project %} aria-current="page"{% endif %}>
+      <span class="target-icon project" aria-hidden="true"></span><span class="target-name">{{ project.name }}</span>
+    </a>
+    {% endfor %}
+    <a href="{{ team_url }}&amp;project=none"{% if selection.project == "none" %} aria-current="page"{% endif %}>
+      <span class="target-icon issue" aria-hidden="true"></span><span class="target-name">Без проекта</span>
+    </a>
+    {% endif %}
+    {% if target is defined %}
+    <p class="nav-title">Проекты и задачи</p>
+    {% for item in targets.values() %}
+    <a href="{{ item.url }}"{% if item == target %} aria-current="page"{% endif %}>
+      <span class="target-icon {{ item.kind }}" aria-hidden="true"></span><span class="target-name">{{ item.name }}</span>
+    </a>
+    {% endfor %}
+    {% endif %}
+  </div>
+</nav>

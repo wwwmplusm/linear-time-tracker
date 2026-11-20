@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block head %}<script src="/static/tracker.js" defer></script>{% endblock %}
+{% block content %}
+    <p class="notice error" id="sync-error" role="status" hidden>Не удалось обновить таймеры. Повторим попытку.</p>
+    {% include "state.html" %}
+
+    {% if target.kind == "issue" %}
+    <details class="manual"{% if error %} open{% endif %}>
+      <summary>Записать запуск агента</summary>
+      <form method="post" action="{{ target.url }}/agent-runs" class="agent-form">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="key" value="{{ form.key }}">
+        <p class="muted">Часовой пояс · {{ timezone }}</p>
+        <div class="agent-fields">
+          <label>Начало
+            <input type="datetime-local" name="started" step="1" value="{{ form.started }}" required{% if error %} aria-describedby="agent-error"{% endif %}>
+          </label>
+          <label>Окончание
+            <input type="datetime-local" name="ended" step="1" value="{{ form.ended }}" required{% if error %} aria-describedby="agent-error"{% endif %}>
+          </label>
+        </div>
+        {% if error %}<p id="agent-error" class="error" role="alert">{{ error }}</p>{% endif %}
+        <button class="secondary" type="submit">Сохранить запуск</button>
+      </form>
+    </details>
+    {% endif %}
+{% endblock %}

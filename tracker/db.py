@@ -1,0 +1,266 @@
+import os
+import sqlite3
+from contextlib import closing, contextmanager
+from pathlib import Path
+from time import time_ns
+from uuid import uuid4
+
+from tracker.config import Target
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS intervals (
+    id INTEGER PRIMARY KEY,
+    target TEXT NOT NULL,
+    started_ms INTEGER NOT NULL,
+    ended_ms INTEGER CHECK (ended_ms >= started_ms)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_running_timer
+    ON intervals(target) WHERE ended_ms IS NULL;
+CREATE INDEX IF NOT EXISTS recent_intervals ON intervals(ended_ms DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS starts (
+    target TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    interval_id INTEGER NOT NULL REFERENCES intervals(id),
+    PRIMARY KEY (target, request_key)
+);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id INTEGER PRIMARY KEY,
+    target TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    started_ms INTEGER NOT NULL,
+    ended_ms INTEGER NOT NULL CHECK (ended_ms > started_ms),
+    UNIQUE (target, request_key)
+);
+CREATE INDEX IF NOT EXISTS recent_agent_runs ON agent_runs(ended_ms DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    digest TEXT PRIMARY KEY,
+    expires_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS linear_oauth_requests (
+    state TEXT PRIMARY KEY,
+    session_digest TEXT NOT NULL REFERENCES sessions(digest) ON DELETE CASCADE,
+    verifier TEXT NOT NULL,
+    expires_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS linear_connection (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    client_id TEXT NOT NULL,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT NOT NULL,
+    expires_ms INTEGER NOT NULL,
+    account_name TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS linear_targets (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('project', 'issue')),
+    name TEXT NOT NULL,
+    reference TEXT NOT NULL,
+    project_link_id TEXT NOT NULL
+);
+"""
+
+INTERVAL_FIELDS = {
+    "worked_ms": "INTEGER",
+    "segment_started_ms": "INTEGER",
+    "paused_ms": "INTEGER",
+    "version": "INTEGER NOT NULL DEFAULT 0",
+}
+
+
+def now_ms() -> int:
+    return time_ns() // 1_000_000
+
+
+def running_since(row: sqlite3.Row) -> int | None:
+    if row["ended_ms"] is not None or row["paused_ms"] is not None:
+        return None
+    return row["segment_started_ms"] if row["segment_started_ms"] is not None else row["started_ms"]
+
+
+def elapsed_ms(row: sqlite3.Row, now: int) -> int:
+    if row["ended_ms"] is not None and row["worked_ms"] is None:
+        return row["ended_ms"] - row["started_ms"]
+    since = running_since(row)
+    return (row["worked_ms"] or 0) + (max(0, now - since) if since is not None else 0)
+
+
+class Database:
+    def __init__(self, path: Path):
+        self.path = path
+
+    def connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    def initialize(self) -> None:
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+        with closing(self.connect()) as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.executescript(SCHEMA)
+        with self.transaction(write=True) as conn:
+            existing = {row["name"] for row in conn.execute("PRAGMA table_info(intervals)")}
+            for name, definition in INTERVAL_FIELDS.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE intervals ADD COLUMN {name} {definition}")
+
+    @contextmanager
+    def transaction(self, *, write: bool = False):
+        with closing(self.connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            yield conn
+
+    def start(self, target: Target, request_key: str, *, linear_reference: str | None = None) -> None:
+        with self.transaction(write=True) as conn:
+            if linear_reference is not None:
+                self._register_linear_target(conn, target, linear_reference)
+            self._start(conn, target.slug, request_key)
+
+    @staticmethod
+    def _start(conn: sqlite3.Connection, slug: str, request_key: str) -> None:
+        seen = conn.execute(
+            "SELECT 1 FROM starts WHERE target = ? AND request_key = ?", (slug, request_key)
+        ).fetchone()
+        if seen:
+            return
+        active = conn.execute(
+            "SELECT id FROM intervals WHERE target = ? AND ended_ms IS NULL", (slug,)
+        ).fetchone()
+        if active:
+            interval_id = active["id"]
+        else:
+            interval_id = conn.execute(
+                "INSERT INTO intervals (target, started_ms) VALUES (?, ?)", (slug, now_ms())
+            ).lastrowid
+        conn.execute(
+            "INSERT INTO starts (target, request_key, interval_id) VALUES (?, ?, ?)",
+            (slug, request_key, interval_id),
+        )
+
+    def restart(self, interval_id: int, request_key: str) -> bool:
+        with self.transaction(write=True) as conn:
+            row = conn.execute(
+                "SELECT target FROM intervals WHERE id = ? AND ended_ms IS NOT NULL", (interval_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            self._start(conn, row["target"], request_key)
+            return True
+
+    @staticmethod
+    def _register_linear_target(conn: sqlite3.Connection, target: Target, reference: str) -> None:
+        conn.execute(
+            """
+            INSERT INTO linear_targets VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name = excluded.name, reference = excluded.reference
+            """,
+            (target.slug.removeprefix("linear-"), target.kind, target.name, reference, str(uuid4())),
+        )
+
+    def register_linear_target(self, target: Target, reference: str) -> None:
+        with self.transaction(write=True) as conn:
+            self._register_linear_target(conn, target, reference)
+
+    @staticmethod
+    def _active_timers(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+        return conn.execute(
+            "SELECT * FROM intervals WHERE ended_ms IS NULL ORDER BY started_ms, id"
+        ).fetchall()
+
+    def active_timers(self) -> list[sqlite3.Row]:
+        with self.transaction() as conn:
+            return self._active_timers(conn)
+
+    def stop(self, interval_id: int) -> None:
+        with self.transaction(write=True) as conn:
+            conn.execute(
+                """
+                UPDATE intervals SET
+                    ended_ms = max(coalesce(paused_ms, segment_started_ms, started_ms), :now),
+                    worked_ms = coalesce(worked_ms, 0) + CASE
+                        WHEN paused_ms IS NULL THEN max(0, :now - coalesce(segment_started_ms, started_ms))
+                        ELSE 0
+                    END,
+                    paused_ms = NULL
+                WHERE id = :id AND ended_ms IS NULL
+                """,
+                {"now": now_ms(), "id": interval_id},
+            )
+
+    def pause(self, interval_id: int, version: int) -> None:
+        with self.transaction(write=True) as conn:
+            conn.execute(
+                """
+                UPDATE intervals SET
+                    paused_ms = max(coalesce(segment_started_ms, started_ms), :now),
+                    worked_ms = coalesce(worked_ms, 0) + max(0, :now - coalesce(segment_started_ms, started_ms)),
+                    version = version + 1
+                WHERE id = :id AND version = :version AND ended_ms IS NULL AND paused_ms IS NULL
+                """,
+                {"now": now_ms(), "id": interval_id, "version": version},
+            )
+
+    def resume(self, interval_id: int, version: int) -> None:
+        with self.transaction(write=True) as conn:
+            conn.execute(
+                """
+                UPDATE intervals SET segment_started_ms = max(paused_ms, ?),
+                    paused_ms = NULL, version = version + 1
+                WHERE id = ? AND version = ? AND ended_ms IS NULL AND paused_ms IS NOT NULL
+                """,
+                (now_ms(), interval_id, version),
+            )
+
+    def record_agent_run(self, target: str, request_key: str, start: int, finish: int) -> None:
+        with self.transaction(write=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_runs (target, request_key, started_ms, ended_ms)
+                VALUES (?, ?, ?, ?) ON CONFLICT(target, request_key) DO NOTHING
+                """,
+                (target, request_key, start, finish),
+            )
+
+    def snapshot(self) -> tuple[list[sqlite3.Row], list[sqlite3.Row], list[sqlite3.Row]]:
+        with self.transaction() as conn:
+            active = self._active_timers(conn)
+            personal = conn.execute(
+                """
+                SELECT * FROM intervals WHERE ended_ms IS NOT NULL
+                ORDER BY ended_ms DESC, id DESC LIMIT 15
+                """
+            ).fetchall()
+            agents = conn.execute(
+                "SELECT * FROM agent_runs ORDER BY ended_ms DESC, id DESC LIMIT 15"
+            ).fetchall()
+        return active, personal, agents
+
+    def add_session(self, digest: str, expires_ms: int) -> None:
+        with self.transaction(write=True) as conn:
+            conn.execute("DELETE FROM sessions WHERE expires_ms <= ?", (now_ms(),))
+            conn.execute(
+                "INSERT INTO sessions (digest, expires_ms) VALUES (?, ?)", (digest, expires_ms)
+            )
+
+    def has_session(self, digest: str) -> bool:
+        with self.transaction() as conn:
+            return conn.execute(
+                "SELECT 1 FROM sessions WHERE digest = ? AND expires_ms > ?", (digest, now_ms())
+            ).fetchone() is not None
+
+    def remove_session(self, digest: str) -> None:
+        with self.transaction(write=True) as conn:
+            conn.execute("DELETE FROM sessions WHERE digest = ?", (digest,))

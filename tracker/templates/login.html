@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="login">
+  {% if target %}<p class="context">{{ "Проект" if target.kind == "project" else "Задача" }}</p>{% endif %}
+  <h1>{{ target.name if target else "Вход в трекер" }}</h1>
+  <form class="login-form" method="post" action="{{ login_url }}">
+    <input type="hidden" name="nonce" value="{{ nonce }}">
+    <label>Пароль владельца
+      <input type="password" name="credential" autocomplete="current-password" required autofocus{% if error %} aria-invalid="true" aria-describedby="login-error"{% endif %}>
+    </label>
+    {% if error %}<p id="login-error" class="error" role="alert">{{ error }}</p>{% endif %}
+    <button class="primary" type="submit">Войти</button>
+  </form>
+</section>
+{% endblock %}

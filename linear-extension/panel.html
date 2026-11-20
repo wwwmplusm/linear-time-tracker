@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="assets/type.css">
+  <link rel="stylesheet" href="panel.css">
+  <script src="panel.js" defer></script>
+  <title>Таймеры</title>
+</head>
+<body>
+  <main class="dock">
+    <div class="toolbar">
+      <button id="toggle" type="button" aria-controls="panel" aria-expanded="false">
+        <img src="assets/timer-mark.png" width="22" height="22" alt=""><span id="toggle-label">Таймеры</span>
+      </button>
+      <button id="quick" type="button" class="primary" hidden>
+        <span class="icon" aria-hidden="true"></span><span id="quick-label"></span>
+      </button>
+    </div>
+    <section id="panel" aria-label="Панель таймеров" hidden>
+      <div class="panel-content">
+        <p id="status" role="status">Загружаем таймеры…</p>
+        <p id="target-kind" class="subtle" hidden></p>
+        <h1 id="target" hidden></h1>
+        <div class="setup" id="setup" hidden>
+          <a target="_blank" rel="noreferrer" id="setup-link">Войти в трекер</a>
+        </div>
+        <div id="sections" hidden>
+          <nav class="panel-nav" aria-label="Навигация">
+            <button type="button" data-section="timer-overview">Таймеры</button>
+            <button type="button" data-section="project-issues" hidden>Задачи</button>
+            <button type="button" data-section="journal">Журнал</button>
+          </nav>
+          <section id="timer-overview" aria-labelledby="timer-overview-title">
+            <div class="timer-heading">
+              <h2 id="timer-overview-title">Активные таймеры</h2>
+              <span class="subtle" id="timer-counts"></span>
+            </div>
+            <div id="active"></div>
+          </section>
+          <section id="project-issues" aria-labelledby="project-issues-title" hidden>
+            <h2 id="project-issues-title">Таймеры задач проекта</h2>
+            <div id="issue-rows"></div>
+            <p id="issue-status" class="subtle" role="status" hidden></p>
+            <button id="more-issues" type="button" hidden>Ещё задачи</button>
+          </section>
+          <details id="manual" hidden>
+            <summary>Записать запуск агента</summary>
+            <form id="agent" class="fields">
+              <p class="subtle" id="zone"></p>
+              <label>Начало<input name="started" type="datetime-local" step="1" required></label>
+              <label>Окончание<input name="ended" type="datetime-local" step="1" required></label>
+              <button type="submit">Сохранить запуск</button>
+            </form>
+          </details>
+          <details id="journal">
+            <summary>Журнал</summary>
+            <h2>Личное время</h2>
+            <div id="personal"></div>
+            <h2>Запуски агентов</h2>
+            <div id="agents"></div>
+          </details>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
