@@ -45,6 +45,14 @@ TRACKER_SECURE_COOKIE=0 uv run --locked --no-dev uvicorn tracker.app:create_app 
 
 Откройте `http://127.0.0.1:8765` и введите значение `TRACKER_PASSWORD` из локального файла `.env`. SQLite сохраняется в `data/tracker.sqlite3`. Для другого пути задайте `TRACKER_DB`.
 
+## Vercel
+
+Vercel запускает FastAPI через `main.py`. Подключите отдельную PostgreSQL, например Neon из Marketplace, к окружению Production. Приложение читает `DATABASE_URL` или `TRACKER_DATABASE_URL` и проверяет сертификат сервера. Без PostgreSQL приложение на Vercel не запускается, поскольку файловая система функции не сохраняет данные между запусками. [Ограничения файловой системы Vercel](https://vercel.com/docs/functions/runtimes#file-system-support)
+
+Задайте случайный `TRACKER_PASSWORD` длиной от 24 символов как чувствительную переменную Production. Доступ к страницам таймеров требует пароля владельца, а cookie сессии передаётся только по HTTPS. По умолчанию используются примеры целей из `targets.example.toml`. Чтобы задать свои цели, сохраните содержимое `targets.toml` в переменной Production `TRACKER_TARGETS_TOML`.
+
+Для подключения Linear зарегистрируйте HTTPS-адрес `/oauth/callback` основного домена Vercel в настройках OAuth-приложения Linear. Задайте `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` и `LINEAR_REDIRECT_URI` в Production. Для добавления ссылок в задачи также нужен `LINEAR_TRACKER_ORIGIN`. Развёртывание создаёт пустую облачную базу. История, сессии и токены из локальной SQLite автоматически не переносятся.
+
 ## HTTPS для ноутбука и телефона
 
 На постоянно доступном хосте с Docker Compose подготовьте те же `targets.toml` и `.env`. Укажите в `TRACKER_DOMAIN` собственное DNS-имя без протокола, направьте DNS на хост и откройте входящие TCP-порты 80 и 443. В `.env` нужен случайный пароль владельца длиной от 24 символов. Пример переменных есть в [.env.example](.env.example).

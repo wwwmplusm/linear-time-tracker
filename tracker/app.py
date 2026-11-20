@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Path as PathParam, Qu
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from tracker.config import Settings, Target
 from tracker.db import Database, elapsed_ms, now_ms, running_since
@@ -84,7 +85,7 @@ def agent_times(started: str, ended: str, zone: ZoneInfo) -> tuple[int, int]:
 
 def create_app() -> FastAPI:
     settings = Settings.from_env()
-    db = Database(settings.database)
+    db = Database(settings.database, settings.database_url)
     linear_settings = LinearSettings.from_env()
     linear = LinearIntegration(db, linear_settings) if linear_settings else None
     password = hashlib.sha256(settings.password.encode()).digest()
@@ -93,7 +94,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        db.initialize()
+        await run_in_threadpool(db.initialize)
         yield
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -116,6 +117,7 @@ def create_app() -> FastAPI:
         )
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
         if settings.secure_cookie:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
         return response
@@ -185,8 +187,7 @@ def create_app() -> FastAPI:
             request,
             "login.html",
             {
-                "target": target,
-                "page_title": target.name if target else "Вход",
+                "page_title": "Вход",
                 "login_url": f"{target.url}/login" if target else f"/linear/login{selection.query}",
                 "nonce": nonce,
                 "error": error,

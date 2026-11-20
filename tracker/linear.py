@@ -4,15 +4,13 @@ import os
 from base64 import urlsafe_b64encode
 from dataclasses import dataclass, field
 from secrets import token_urlsafe
-from sqlite3 import Row
-from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 from uuid import UUID
 
 from tracker.config import Target
-from tracker.db import Database, now_ms
+from tracker.db import Database, Row, now_ms
 
 
 AUTHORIZE_URL = "https://linear.app/oauth/authorize"
@@ -117,7 +115,6 @@ class LinearIntegration:
     def __init__(self, db: Database, settings: LinearSettings):
         self.db = db
         self.settings = settings
-        self.connection_lock = Lock()
 
     def authorize(self, session_digest: str) -> str:
         state = token_urlsafe(32)
@@ -153,7 +150,7 @@ class LinearIntegration:
             raise LinearError("Запрос авторизации устарел.", kind="state")
         if not code:
             raise LinearError("Linear не подтвердил подключение.", kind="denied")
-        with self.connection_lock:
+        with self.db.linear_connection_lock():
             access, refresh, expiry = self._token(
                 grant_type="authorization_code", code=code, redirect_uri=self.settings.redirect_uri,
                 code_verifier=request["verifier"],
@@ -199,7 +196,10 @@ class LinearIntegration:
             ).fetchone()
 
     def access_token(self) -> str:
-        with self.connection_lock:
+        known = self.connection()
+        if known is not None and known["expires_ms"] > now_ms() + 60_000:
+            return known["access_token"]
+        with self.db.linear_connection_lock():
             known = self.connection()
             if known is None:
                 raise LinearError("Сначала подключите аккаунт Linear.")

@@ -1,8 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="login">
-  {% if target %}<p class="context">{{ "Проект" if target.kind == "project" else "Задача" }}</p>{% endif %}
-  <h1>{{ target.name if target else "Вход в трекер" }}</h1>
+  <h1>Вход в трекер</h1>
   <form class="login-form" method="post" action="{{ login_url }}">
     <input type="hidden" name="nonce" value="{{ nonce }}">
     <label>Пароль владельца
