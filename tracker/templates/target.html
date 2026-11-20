@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block head %}<script src="/static/tracker.js" defer></script>{% endblock %}
+{% block head %}<script src="{{ asset('tracker.js') }}" defer></script>{% endblock %}
 {% block content %}
     <p class="notice error" id="sync-error" role="status" hidden>Не удалось обновить таймеры. Повторим попытку.</p>
     {% include "state.html" %}

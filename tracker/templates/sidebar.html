@@ -1,4 +1,5 @@
-<nav class="target-nav" aria-label="Навигация">
+{% from "source-link.html" import source_link %}
+<nav id="workspace-nav" class="target-nav" aria-label="Навигация">
   <div class="targets">
     {% if linear_enabled %}
     <a href="/linear"{% if selection is defined and not selection.team %} aria-current="page"{% endif %}>
@@ -9,17 +10,23 @@
     {% if menu_teams %}
     <p class="nav-title">Команды</p>
     {% for team in menu_teams %}
+    <div class="nav-row">
     <a href="/linear?team={{ team.id }}"{% if team.id == selection.team %} aria-current="{{ 'true' if selection.project else 'page' }}"{% endif %}>
-      <span class="target-icon team" aria-hidden="true"></span><span class="target-name">{{ team.name }}</span>
+      <span class="team-monogram" aria-hidden="true">{{ team.name[:1] }}</span><span class="target-name">{{ team.name }}</span>
     </a>
+      {{ source_link(team.url, team.name) }}
+    </div>
     {% endfor %}
     {% endif %}
     {% if selection is defined and selection.team %}
     <p class="nav-title">Проекты</p>
     {% for project in menu_projects %}
+    <div class="nav-row">
     <a href="{{ team_url }}&amp;project={{ project.id }}"{% if project.id == selection.project %} aria-current="page"{% endif %}>
       <span class="target-icon project" aria-hidden="true"></span><span class="target-name">{{ project.name }}</span>
     </a>
+      {{ source_link(project.url, project.name) }}
+    </div>
     {% endfor %}
     <a href="{{ team_url }}&amp;project=none"{% if selection.project == "none" %} aria-current="page"{% endif %}>
       <span class="target-icon issue" aria-hidden="true"></span><span class="target-name">Без проекта</span>
@@ -28,9 +35,12 @@
     {% if target is defined %}
     <p class="nav-title">Проекты и задачи</p>
     {% for item in targets.values() %}
+    <div class="nav-row">
     <a href="{{ item.url }}"{% if item == target %} aria-current="page"{% endif %}>
       <span class="target-icon {{ item.kind }}" aria-hidden="true"></span><span class="target-name">{{ item.name }}</span>
     </a>
+      {{ source_link(item.source_href, item.name) }}
+    </div>
     {% endfor %}
     {% endif %}
   </div>

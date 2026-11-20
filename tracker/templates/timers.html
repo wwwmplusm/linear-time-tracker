@@ -1,6 +1,8 @@
+{% from "source-link.html" import source_link %}
 {% macro target_name(slug) -%}
   {% if slug in targets %}
   <a href="{{ targets[slug].url }}">{{ targets[slug].name }}</a>
+  {{ source_link(targets[slug].source_href, targets[slug].name) }}
   {% else %}
   {{ slug }}
   {% endif %}

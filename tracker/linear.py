@@ -3,11 +3,12 @@ import json
 import os
 from base64 import urlsafe_b64encode
 from dataclasses import dataclass, field
+from functools import lru_cache
 from secrets import token_urlsafe
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlencode, urlsplit
 from uuid import UUID
+
+import urllib3
 
 from tracker.config import Target
 from tracker.db import Database, Row, now_ms
@@ -81,20 +82,25 @@ class LinearSettings:
         return self.redirect_uri.removesuffix("/oauth/callback")
 
 
+_http = urllib3.PoolManager(maxsize=8, timeout=urllib3.Timeout(connect=3, read=8))
+
+
 def _post(url: str, payload: bytes, headers: dict) -> dict:
-    request = Request(url, data=payload, headers=headers, method="POST")
     try:
-        with urlopen(request, timeout=8) as response:
-            data = json.load(response)
+        response = _http.request("POST", url, body=payload, headers=headers, retries=False, redirect=False)
+        if response.status in {400, 401, 403}:
+            raise LinearError("Linear отклонил запрос. Проверьте доступ приложения или переподключите Linear.")
+        if response.status == 200:
+            data = json.loads(response.data)
             if isinstance(data, dict):
                 return data
-            raise ValueError("Expected a JSON object")
-    except HTTPError as error:
-        if error.code in {400, 401, 403}:
-            raise LinearError("Linear отклонил запрос. Проверьте доступ приложения или переподключите Linear.") from None
-        raise LinearError("Linear временно не ответил. Попробуйте ещё раз.") from None
-    except (URLError, TimeoutError, ValueError):
-        raise LinearError("Linear временно не ответил. Попробуйте ещё раз.") from None
+    except (urllib3.exceptions.HTTPError, OSError, ValueError):
+        pass
+    raise LinearError("Linear временно не ответил. Попробуйте ещё раз.")
+
+
+def team_link(workspace: str, key: str) -> str:
+    return f"https://linear.app/{quote(workspace, safe='')}/team/{quote(key, safe='')}/all"
 
 
 def _graphql(token: str, query: str, variables: dict) -> dict:
@@ -108,7 +114,7 @@ def _graphql(token: str, query: str, variables: dict) -> dict:
 
 
 def tracker_target(row: Row) -> Target:
-    return Target(slug=f"linear-{row['id']}", name=row["name"], kind=row["kind"])
+    return Target(slug=f"linear-{row['id']}", name=row["name"], kind=row["kind"], linear_url=row["linear_url"])
 
 
 class LinearIntegration:
@@ -210,6 +216,10 @@ class LinearIntegration:
             return access
 
     def browse(self, selection: LinearBrowse) -> dict:
+        return self._browse(self.access_token(), selection, now_ms() // 60_000)
+
+    @lru_cache(maxsize=256)
+    def _browse(self, token: str, selection: LinearBrowse, minute: int) -> dict:
         pagination = {
             "first": None if selection.before else 25,
             "last": 25 if selection.before else None,
@@ -217,12 +227,12 @@ class LinearIntegration:
             "before": selection.before or None,
         }
         name_filter = {"containsIgnoreCase": selection.term}
-        token = self.access_token()
         if not selection.team:
-            return _graphql(
+            data = _graphql(
                 token,
                 """
                 query TrackerTeams($filter: TeamFilter, $first: Int, $last: Int, $after: String, $before: String) {
+                    organization { urlKey }
                     page: teams(filter: $filter, first: $first, last: $last, after: $after, before: $before) {
                         nodes { id name key }
                         pageInfo { hasNextPage endCursor hasPreviousPage startCursor }
@@ -231,17 +241,22 @@ class LinearIntegration:
                 """,
                 {**pagination, "filter": {"name": name_filter} if selection.term else None},
             )
+            workspace = data["organization"]["urlKey"]
+            for team in data["page"]["nodes"]:
+                team["url"] = team_link(workspace, team["key"])
+            return {**data, "url": "https://linear.app/" + quote(workspace, safe="")}
         if not selection.project:
             data = _graphql(
                 token,
                 """
                 query TrackerProjects($team: String!, $filter: ProjectFilter,
                                       $first: Int, $last: Int, $after: String, $before: String) {
+                    organization { urlKey }
                     team(id: $team) {
-                        name
+                        name key
                         page: projects(filter: $filter, first: $first, last: $last,
                                        after: $after, before: $before, orderBy: updatedAt) {
-                            nodes { id name }
+                            nodes { id name url }
                             pageInfo { hasNextPage endCursor hasPreviousPage startCursor }
                         }
                     }
@@ -249,7 +264,8 @@ class LinearIntegration:
                 """,
                 {**pagination, "team": selection.team, "filter": {"name": name_filter} if selection.term else None},
             )
-            return {"team": data["team"]["name"], "page": data["team"]["page"]}
+            return {"team": data["team"]["name"], "page": data["team"]["page"],
+                    "url": team_link(data["organization"]["urlKey"], data["team"]["key"])}
         issue_filter = {"title": name_filter} if selection.term else {}
         if selection.project == "none":
             data = _graphql(
@@ -257,11 +273,12 @@ class LinearIntegration:
                 """
                 query TrackerUnassigned($team: String!, $filter: IssueFilter!,
                                         $first: Int, $last: Int, $after: String, $before: String) {
+                    organization { urlKey }
                     team(id: $team) {
-                        name
+                        name key
                         page: issues(filter: $filter, first: $first, last: $last,
                                      after: $after, before: $before, orderBy: updatedAt) {
-                            nodes { id name: title identifier }
+                            nodes { id name: title identifier url }
                             pageInfo { hasNextPage endCursor hasPreviousPage startCursor }
                         }
                     }
@@ -269,7 +286,8 @@ class LinearIntegration:
                 """,
                 {**pagination, "team": selection.team, "filter": {**issue_filter, "project": {"null": True}}},
             )
-            return {"team": data["team"]["name"], "project": "Без проекта", "page": data["team"]["page"]}
+            return {"team": data["team"]["name"], "project": "Без проекта", "page": data["team"]["page"],
+                    "url": team_link(data["organization"]["urlKey"], data["team"]["key"])}
         team_filter = {"id": {"eq": selection.team}}
         data = _graphql(
             token,
@@ -278,11 +296,11 @@ class LinearIntegration:
                                 $first: Int, $last: Int, $after: String, $before: String) {
                 team(id: $team) { name }
                 project(id: $project) {
-                    name
+                    name url
                     teams(first: 1, filter: $membership) { nodes { id } }
                     page: issues(filter: $filter, first: $first, last: $last,
                                  after: $after, before: $before, orderBy: updatedAt) {
-                        nodes { id name: title identifier }
+                        nodes { id name: title identifier url }
                         pageInfo { hasNextPage endCursor hasPreviousPage startCursor }
                     }
                 }
@@ -296,7 +314,7 @@ class LinearIntegration:
         project = data["project"]
         if not project["teams"]["nodes"]:
             raise LinearError("Этот проект больше не относится к выбранной команде.", kind="membership")
-        return {"team": data["team"]["name"], "project": project["name"], "page": project["page"]}
+        return {"team": data["team"]["name"], "project": project["name"], "url": project["url"], "page": project["page"]}
 
     def workspace(self) -> str:
         return _graphql(self.access_token(), "query { organization { urlKey } }", {})["organization"]["urlKey"]
@@ -308,7 +326,7 @@ class LinearIntegration:
             query ($id: String!, $after: String, $limit: Int!) {
                 project(id: $id) {
                     issues(first: $limit, after: $after, orderBy: updatedAt) {
-                        nodes { id identifier title }
+                        nodes { id identifier title url }
                         pageInfo { hasNextPage endCursor }
                     }
                 }
@@ -322,10 +340,10 @@ class LinearIntegration:
         self, kind: str, reference: str, *, project_id: str | None = None, team_id: str | None = None,
     ) -> tuple[Target, str]:
         if kind == "project":
-            query = "query ($id: String!) { project(id: $id) { id name } }"
+            query = "query ($id: String!) { project(id: $id) { id name url } }"
             name_field = "name"
         else:
-            query = "query ($id: String!) { issue(id: $id) { id identifier title project { id } team { id } } }"
+            query = "query ($id: String!) { issue(id: $id) { id identifier title url project { id } team { id } } }"
             name_field = "title"
         data = _graphql(self.access_token(), query, {"id": reference}).get(kind)
         if not data:
@@ -336,7 +354,7 @@ class LinearIntegration:
         if team_id and (data.get("team") or {}).get("id") != team_id:
             raise LinearError("Задача больше не относится к выбранной команде.", kind="membership")
         target_id = str(UUID(data["id"]))
-        target = Target(slug=f"linear-{target_id}", kind=kind, name=data[name_field])
+        target = Target(slug=f"linear-{target_id}", kind=kind, name=data[name_field], linear_url=data["url"])
         return target, data.get("identifier", reference)
 
     def import_target(self, kind: str, reference: str) -> Target:

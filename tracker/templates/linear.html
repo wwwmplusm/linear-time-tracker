@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{% block head %}<script src="/static/tracker.js" defer></script>{% endblock %}
+{% from "source-link.html" import source_link %}
+{% block head %}<script src="{{ asset('tracker.js') }}" defer></script><script src="{{ asset('catalog.js') }}" defer></script>{% endblock %}
 
 {% macro start_timer(kind, id, name, label="Запустить") %}
   {% set slug = "linear-" ~ id %}
@@ -22,7 +23,6 @@
 
 {% block content %}
 <p class="notice error" id="sync-error" role="status" hidden>Не удалось обновить таймеры. Повторим попытку.</p>
-{% include "linear-state.html" %}
 
 <section class="linear-intro">
   {% if account_name %}
@@ -35,7 +35,8 @@
     </nav>
     {% endif %}
     <div class="linear-title">
-      <h1>{{ results.project if results and selection.project else results.team if results and selection.team else "Команды Linear" }}</h1>
+      <div class="source-title"><h1>{{ results.project if results and selection.project else results.team if results and selection.team else "Команды Linear" }}</h1>
+      {% if results %}{{ source_link(results.url, results.project if selection.project and selection.project != "none" else results.team or "рабочее пространство") }}{% endif %}</div>
       {% if results and selection.project and selection.project != "none" %}
       {{ start_timer("project", selection.project, results.project, "Таймер проекта") }}
       {% endif %}
@@ -55,20 +56,26 @@
   {% if message %}<p class="muted" role="status">{{ message }}</p>{% endif %}
 </section>
 
+{% include "linear-state.html" %}
+
 {% if browse_error %}
 <p class="error" role="alert">{{ browse_error }}</p>
 {% elif results %}
 <section class="linear-browser"{% if selection.team %} aria-labelledby="linear-list"{% else %} aria-label="Список команд"{% endif %}>
-  {% if selection.team %}<h2 id="linear-list">{{ "Задачи" if selection.project else "Проекты" }}</h2>{% endif %}
-  <form method="get" action="/linear" role="search" class="linear-search">
-    {% if selection.team %}<input type="hidden" name="team" value="{{ selection.team }}">{% endif %}
-    {% if selection.project %}<input type="hidden" name="project" value="{{ selection.project }}">{% endif %}
-    <input type="search" name="q" value="{{ selection.term }}" maxlength="100"
-      aria-label="{{ "Название задачи" if selection.project else "Название проекта" if selection.team else "Название команды" }}"
-      placeholder="{{ "Найти задачу" if selection.project else "Найти проект" if selection.team else "Найти команду" }}">
-    <button class="secondary" type="submit">Найти</button>
-    {% if selection.term %}<a class="quiet" href="{{ clear_url }}">Сбросить</a>{% endif %}
-  </form>
+  <div class="list-toolbar">
+    <h2 id="linear-list">{{ "Задачи" if selection.project else "Проекты" if selection.team else "Все команды" }}</h2>
+    {% if results.page.nodes or selection.term %}
+    <form method="get" action="/linear" role="search" class="linear-search">
+      {% if selection.team %}<input type="hidden" name="team" value="{{ selection.team }}">{% endif %}
+      {% if selection.project %}<input type="hidden" name="project" value="{{ selection.project }}">{% endif %}
+      <input type="search" name="q" value="{{ selection.term }}" maxlength="100"
+        aria-label="{{ "Название задачи" if selection.project else "Название проекта" if selection.team else "Название команды" }}"
+        placeholder="{{ "Найти задачу" if selection.project else "Найти проект" if selection.team else "Найти команду" }}">
+      <button class="secondary" type="submit">Найти</button>
+      {% if selection.term %}<a class="quiet" href="{{ clear_url }}">Сбросить</a>{% endif %}
+    </form>
+    {% endif %}
+  </div>
 
   <ul class="entries">
     {% for item in results.page.nodes %}
@@ -77,7 +84,7 @@
         <div class="entry-main">
           {% if item.id in added %}<a href="{{ added[item.id] }}">{{ item.name }}</a>
           {% else %}<p>{{ item.name }}</p>{% endif %}
-          <p class="muted">{{ item.identifier }}</p>
+          <p class="muted">{{ source_link(item.url, item.name, item.identifier) }}</p>
         </div>
         {{ start_timer("issue", item.id, item.name) }}
       </li>
@@ -93,10 +100,31 @@
           <span class="muted linear-team-key">{{ item.key }}</span>
         </a>
         {% endif %}
+        {{ source_link(item.url, item.name) }}
       </li>
       {% endif %}
     {% else %}
-      <li class="empty">{{ "Совпадений нет" if selection.term else "Нет задач" if selection.project else "Нет проектов" if selection.team else "Нет команд" }}</li>
+      <li class="browser-empty">
+      <div class="empty-copy">
+        <h3>{{ "Совпадений нет" if selection.term else "Задач пока нет" if selection.project else "Проектов пока нет" if selection.team else "Команд пока нет" }}</h3>
+        {% if selection.term %}
+        <p>Попробуйте другое название.</p>
+        <a href="{{ clear_url }}">Очистить поиск</a>
+        {% elif selection.project == "none" %}
+        <p>Здесь появятся задачи команды «{{ results.team }}», которым в Linear не назначен проект.</p>
+        {% if menu_projects %}<a href="{{ team_url }}">К проектам команды</a>
+        {% else %}<a href="/linear">Выбрать другую команду</a>{% endif %}
+        {% elif selection.project %}
+        <p>Когда в этом проекте появится задача в Linear, для неё можно будет запустить таймер.</p>
+        <a href="{{ team_url }}">К проектам команды</a>
+        {% elif selection.team %}
+        <p>У этой команды могут быть задачи без проекта.</p>
+        {% else %}
+        <p>Проверьте, к какому рабочему пространству Linear подключён трекер.</p>
+        {% endif %}
+      </div>
+      <div class="task-illustration" aria-hidden="true"><i></i><i></i><i></i></div>
+    </li>
     {% endfor %}
     {% if selection.team and not selection.project and not selection.term and not (selection.after or selection.before) %}
     <li class="linear-choice">
@@ -123,6 +151,7 @@
     <li class="entry linear-entry">
       <div class="entry-main">
         <a href="{{ target.url }}">{{ target.name }}</a>
+        {{ source_link(target.source_href, target.name) }}
         <p class="muted">{{ "Проект" if target.kind == "project" else reference }}</p>
       </div>
       {% if account_name and tracker_origin %}

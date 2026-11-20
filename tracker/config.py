@@ -12,6 +12,19 @@ class Target:
     slug: str
     name: str
     kind: str
+    linear_url: str | None = None
+
+    def __post_init__(self):
+        if self.linear_url and urlsplit(self.linear_url)[:2] != ("https", "linear.app"):
+            raise ValueError("Expected an HTTPS link to linear.app")
+
+    @property
+    def source_href(self) -> str | None:
+        if self.linear_url:
+            return self.linear_url
+        if re.fullmatch(r"linear-[0-9a-f-]{36}", self.slug):
+            return "/linear/source/" + self.slug[7:]
+        return None
 
     @property
     def url(self) -> str:

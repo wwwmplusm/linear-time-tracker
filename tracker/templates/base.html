@@ -1,34 +1,36 @@
+{% from "source-link.html" import source_link %}
 <!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ page_title or target.name }} · Таймер</title>
-  <link rel="icon" href="/static/assets/timer-mark.png" type="image/png">
-  <link rel="stylesheet" href="/static/assets/type.css">
-  <link rel="stylesheet" href="/static/tracker.css">
+  <link rel="icon" href="{{ asset('assets/timer-mark.png') }}" type="image/png">
+  <link rel="stylesheet" href="{{ asset('assets/type.css') }}">
+  <link rel="stylesheet" href="{{ asset('tracker.css') }}">
   {% block head %}{% endblock %}
 </head>
 <body>
   <header class="top">
     <div class="top-inner">
-      <a class="brand" href="/"><img src="/static/assets/timer-mark.png" width="24" height="24" alt="">Таймер</a>
-      {% if csrf %}
+      <a class="brand" href="/"><img src="{{ asset('assets/timer-mark.png') }}" width="24" height="24" alt="">Таймер</a>
       <div class="header-actions">
+        {{ source_link("https://linear.app", "рабочее пространство", "Linear") }}
+      {% if csrf %}
         {% set running_count = active | selectattr("paused_ms", "none") | list | length %}
-        <a class="quiet timer-indicator" href="#active">
+        <a class="quiet timer-indicator"{% if active %} href="#active"{% else %} data-idle{% endif %}>
           <span class="status-dot" aria-hidden="true"></span>
-          <span id="timer-indicator-text">{% if active %}Идут {{ running_count }}{% if active | length > running_count %} · На паузе {{ active | length - running_count }}{% endif %}{% else %}Таймеры{% endif %}</span>
+          <span id="timer-indicator-text">{% if active %}Идут {{ running_count }}{% if active | length > running_count %} · На паузе {{ active | length - running_count }}{% endif %}{% else %}Нет активных таймеров{% endif %}</span>
         </a>
         <form method="post" action="/logout">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <button class="quiet" type="submit">Выйти</button>
         </form>
-      </div>
       {% endif %}
+      </div>
     </div>
   </header>
-  {% if csrf %}<div class="tracker-layout">{% include "sidebar.html" %}{% endif %}
+  {% if csrf %}<div class="tracker-layout"><button class="nav-toggle" type="button" aria-expanded="false" aria-controls="workspace-nav">Навигация</button>{% include "sidebar.html" %}{% endif %}
   <main class="{{ 'workspace' if csrf else 'page' }}">{% block content %}{% endblock %}</main>
   {% if csrf %}</div>{% endif %}
 </body>

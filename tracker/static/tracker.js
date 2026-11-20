@@ -1,12 +1,17 @@
 let state = document.querySelector("#tracker-state");
 const error = document.querySelector("#sync-error");
-const target = state.dataset.target;
-const stateUrl = state.dataset.stateUrl;
-const linearActions = document.querySelectorAll("[data-linear-target]");
 const indicator = document.querySelector("#timer-indicator-text");
 let serverNow = Number(state.dataset.now);
 let syncedAt = performance.now();
 let pending = false;
+
+const navToggle = document.querySelector(".nav-toggle");
+if (navToggle) {
+  document.documentElement.classList.add("has-nav-toggle");
+  navToggle.addEventListener("click", () => {
+    navToggle.setAttribute("aria-expanded", String(navToggle.getAttribute("aria-expanded") !== "true"));
+  });
+}
 
 const targetList = document.querySelector(".targets");
 const currentTarget = targetList?.querySelector('[aria-current="page"]');
@@ -29,8 +34,12 @@ function updateTimerStatus() {
     [row.dataset.activeTarget, row.hasAttribute("data-paused")],
   ));
   const paused = [...active.values()].filter(Boolean).length;
-  indicator.textContent = active.size ? `Идут ${active.size - paused}${paused ? ` · На паузе ${paused}` : ""}` : "Таймеры";
-  for (const actions of linearActions) {
+  const statusLink = indicator.parentElement;
+  statusLink.toggleAttribute("data-idle", !active.size);
+  if (active.size) statusLink.setAttribute("href", "#active");
+  else statusLink.removeAttribute("href");
+  indicator.textContent = active.size ? `Идут ${active.size - paused}${paused ? ` · На паузе ${paused}` : ""}` : "Нет активных таймеров";
+  for (const actions of document.querySelectorAll("[data-linear-target]")) {
     const form = actions.querySelector("form");
     const link = actions.querySelector("a");
     const running = active.has(actions.dataset.linearTarget);
@@ -46,15 +55,25 @@ function updateTimerStatus() {
 async function refresh() {
   if (pending || document.hidden) return;
   pending = true;
+  const stateUrl = state.dataset.stateUrl;
   try {
-    const response = await fetch(stateUrl, { cache: "no-store", signal: AbortSignal.timeout(5000) });
+    const response = await fetch(stateUrl, { cache: "no-store", headers: { "X-Timer-Revision": state.dataset.revision }, signal: AbortSignal.timeout(5000) });
+    if (stateUrl !== state.dataset.stateUrl) return;
     if (response.status === 401) {
-      location.replace(target);
+      location.replace(state.dataset.target);
+      return;
+    }
+    if (response.status === 204) {
+      serverNow = Number(response.headers.get("X-Tracker-Now"));
+      syncedAt = performance.now();
+      error.hidden = true;
+      updateClocks();
       return;
     }
     if (!response.ok) throw new Error("Could not refresh timers");
     const documentFragment = new DOMParser().parseFromString(await response.text(), "text/html");
     const updated = documentFragment.querySelector("#tracker-state");
+    if (stateUrl !== state.dataset.stateUrl) return;
     serverNow = Number(updated.dataset.now);
     syncedAt = performance.now();
     if (state.dataset.revision !== updated.dataset.revision) {
@@ -75,12 +94,12 @@ async function refresh() {
     error.hidden = false;
   } finally {
     pending = false;
+    if (stateUrl !== state.dataset.stateUrl) refresh();
   }
 }
 
 window.addEventListener("pageshow", event => {
-  if (event.persisted && location.pathname === new URL(target, location.origin).pathname) location.reload();
-  else refresh();
+  if (event.persisted && location.pathname === new URL(state.dataset.target, location.origin).pathname) location.reload();
 });
 window.addEventListener("focus", refresh);
 document.addEventListener("visibilitychange", refresh);

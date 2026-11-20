@@ -13,7 +13,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Path as PathParam, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -100,6 +100,12 @@ def create_app() -> FastAPI:
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
     templates = Jinja2Templates(directory=ROOT / "templates")
+    static_dir = ROOT / "static"
+    asset_versions = {
+        path.relative_to(static_dir).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+        for path in static_dir.rglob("*") if path.is_file()
+    }
+    templates.env.globals["asset"] = lambda name: f"/static/{name}?v={asset_versions[name]}"
     templates.env.filters.update(
         clock=clock,
         utc=lambda ms: utc_datetime(ms).isoformat(timespec="milliseconds"),
@@ -111,7 +117,14 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def private_headers(request: Request, call_next):
         response = await call_next(request)
-        response.headers["Cache-Control"] = "no-store"
+        cache = "no-store"
+        if request.url.path.startswith("/static/") and response.status_code in {200, 304}:
+            name = request.url.path.removeprefix("/static/")
+            version = asset_versions.get(name)
+            cache = "public, max-age=86400" if name.endswith(".woff2") else "public, no-cache"
+            if version and request.query_params.get("v") == version:
+                cache = "public, max-age=31536000, immutable"
+        response.headers["Cache-Control"] = cache
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         )
@@ -158,8 +171,8 @@ def create_app() -> FastAPI:
         with db.transaction() as conn:
             return conn.execute("SELECT * FROM linear_targets ORDER BY kind DESC, name, id").fetchall()
 
-    def all_targets():
-        imported = (tracker_target(row) for row in linear_targets())
+    def all_targets(rows=None):
+        imported = (tracker_target(row) for row in (linear_targets() if rows is None else rows))
         return {**settings.targets, **{target.slug: target for target in imported}}
 
     def get_target(slug: str) -> Target:
@@ -212,6 +225,8 @@ def create_app() -> FastAPI:
             str(tuple(row["id"] for row in personal)),
             str(tuple(row["id"] for row in agents)),
         ))
+        if partial and request.headers.get("X-Timer-Revision") == revision:
+            return Response(status_code=204, headers={"X-Tracker-Now": str(now_ms())})
         context = {
             "target": target,
             "targets": all_targets(),
@@ -377,6 +392,7 @@ def create_app() -> FastAPI:
                     "id": row["id"],
                     "target": row["target"],
                     "name": item.name if item else row["target"],
+                    "linearUrl": item.source_href if item else None,
                     "started": row["started_ms"],
                     "ended": row["ended_ms"],
                 }
@@ -470,29 +486,22 @@ def create_app() -> FastAPI:
             "exchange": "Не удалось завершить подключение. Проверьте настройки OAuth и попробуйте снова.",
         }
 
-        def linear_timer_state(token: str, selection: LinearBrowse) -> dict:
-            active = db.active_timers()
+        def linear_timer_state(token: str, selection: LinearBrowse, active, rows=None) -> dict:
             return {
                 "active": active,
-                "targets": all_targets(),
+                "targets": all_targets(rows),
                 "now": now_ms(),
                 "revision": timer_revision(active),
                 "csrf": csrf_token(token),
                 "selection": selection,
             }
 
-        @lru_cache(maxsize=32)
-        def navigation_rows(team: str, bucket: int) -> tuple[dict, ...]:
-            return tuple(linear.browse(LinearBrowse(team=team))["page"]["nodes"])
-
         def linear_navigation(selection: LinearBrowse, results: dict | None) -> dict:
-            bucket = now_ms() // 60_000
-
             def menu(team: str) -> tuple[dict, ...]:
                 if results and selection == LinearBrowse(team=team):
                     return tuple(results["page"]["nodes"])
                 try:
-                    return navigation_rows(team, bucket)
+                    return linear.browse(LinearBrowse(team=team))["page"]["nodes"]
                 except LinearError:
                     return ()
 
@@ -516,7 +525,7 @@ def create_app() -> FastAPI:
                     browse_error = str(failure)
             page = results["page"]["pageInfo"] if results else {}
             context = {
-                **linear_timer_state(token, selection),
+                **linear_timer_state(token, selection, db.active_timers(), rows),
                 **(linear_navigation(selection, results) if results else {}),
                 "page_title": "Linear",
                 "linear_enabled": True,
@@ -565,7 +574,20 @@ def create_app() -> FastAPI:
         def linear_state(
             request: Request, selection: LinearBrowse = Depends(linear_selection), token: str = Depends(require_session),
         ):
-            return templates.TemplateResponse(request, "linear-state.html", linear_timer_state(token, selection))
+            active = db.active_timers()
+            if request.headers.get("X-Timer-Revision") == timer_revision(active):
+                return Response(status_code=204, headers={"X-Tracker-Now": str(now_ms())})
+            return templates.TemplateResponse(request, "linear-state.html", linear_timer_state(token, selection, active))
+
+        @app.get("/linear/source/{target_id}")
+        def source_link(target_id: UUID, token: str = Depends(require_session)):
+            target = get_target(f"linear-{target_id}")
+            if not target.linear_url:
+                try:
+                    target = linear.import_target(target.kind, str(target_id))
+                except LinearError as error:
+                    raise HTTPException(502, str(error)) from None
+            return RedirectResponse(target.linear_url, status_code=303)
 
         @app.get("/linear/authorize")
         def linear_authorize(request: Request, token: str = Depends(require_session)):
@@ -584,7 +606,7 @@ def create_app() -> FastAPI:
                 return RedirectResponse(f"/linear?oauth={error.kind}", status_code=303)
             panel_workspace.cache_clear()
             panel_target.cache_clear()
-            navigation_rows.cache_clear()
+            linear._browse.cache_clear()
             return RedirectResponse("/linear", status_code=303)
 
         @app.post("/linear/targets")

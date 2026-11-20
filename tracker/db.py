@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS linear_targets (
     kind TEXT NOT NULL CHECK (kind IN ('project', 'issue')),
     name TEXT NOT NULL,
     reference TEXT NOT NULL,
-    project_link_id TEXT NOT NULL
+    project_link_id TEXT NOT NULL,
+    linear_url TEXT
 );
 """
 
@@ -135,6 +136,7 @@ class Database:
             with self.connect() as conn:
                 conn.advisory_lock(POSTGRES_SCHEMA_LOCK)
                 conn.execute(schema.replace("INTEGER", "BIGINT"))
+                conn.execute("ALTER TABLE linear_targets ADD COLUMN IF NOT EXISTS linear_url TEXT")
                 existing = {column.name for column in conn.execute("SELECT * FROM intervals LIMIT 0").description}
                 for name, definition in INTERVAL_FIELDS.items():
                     if name not in existing:
@@ -151,6 +153,8 @@ class Database:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(SCHEMA.format(generated_id="INTEGER PRIMARY KEY"))
         with self.transaction(write=True) as conn:
+            if "linear_url" not in {row["name"] for row in conn.execute("PRAGMA table_info(linear_targets)")}:
+                conn.execute("ALTER TABLE linear_targets ADD COLUMN linear_url TEXT")
             existing = {row["name"] for row in conn.execute("PRAGMA table_info(intervals)")}
             for name, definition in INTERVAL_FIELDS.items():
                 if name not in existing:
@@ -219,10 +223,11 @@ class Database:
     def _register_linear_target(conn: sqlite3.Connection | PostgresConnection, target: Target, reference: str) -> None:
         conn.execute(
             """
-            INSERT INTO linear_targets VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET name = excluded.name, reference = excluded.reference
+            INSERT INTO linear_targets (id, kind, name, reference, project_link_id, linear_url) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name = excluded.name, reference = excluded.reference,
+                linear_url = COALESCE(excluded.linear_url, linear_targets.linear_url)
             """,
-            (target.slug.removeprefix("linear-"), target.kind, target.name, reference, str(uuid4())),
+            (target.slug.removeprefix("linear-"), target.kind, target.name, reference, str(uuid4()), target.linear_url),
         )
 
     def register_linear_target(self, target: Target, reference: str) -> None:

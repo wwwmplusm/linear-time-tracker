@@ -20,8 +20,8 @@ OWNER_PASSWORD = "local-embedded-panel-test-password"
 LINEAR_ISSUE = "/demo/issue/DEMO-1/test-issue"
 LINEAR_PROJECT = "/demo/project/test-project/issues"
 TARGETS = {
-    ("issue", "DEMO-1"): Target("linear-11111111-1111-4111-8111-111111111111", "Тестовая задача", "issue"),
-    ("project", "test-project"): Target("linear-22222222-2222-4222-8222-222222222222", "Тестовый проект", "project"),
+    ("issue", "DEMO-1"): Target("linear-11111111-1111-4111-8111-111111111111", "Тестовая задача", "issue", "https://linear.app/demo/issue/DEMO-1"),
+    ("project", "test-project"): Target("linear-22222222-2222-4222-8222-222222222222", "Тестовый проект", "project", "https://linear.app/demo/project/test-project"),
 }
 
 
@@ -35,7 +35,7 @@ def sign_in(page, url):
 @pytest.fixture
 def live_issue_rows():
     issue = TARGETS["issue", "DEMO-1"]
-    return [{"id": issue.slug.removeprefix("linear-"), "title": issue.name, "identifier": "DEMO-1"}]
+    return [{"id": issue.slug.removeprefix("linear-"), "title": issue.name, "identifier": "DEMO-1", "url": issue.linear_url}]
 
 
 @pytest.fixture
@@ -142,6 +142,7 @@ def test_track_directly_inside_linear(tmp_path, inline_server, stale_worker, liv
         expect(panel.get_by_role("heading", name="Тестовый проект")).to_be_visible()
         expect(panel.get_by_text("Записать запуск агента")).to_be_hidden()
         expect(panel.locator("#active .entry")).to_have_count(2)
+        expect(panel.locator("#active a").filter(has_text="Тестовая задача")).to_have_attribute("href", TARGETS["issue", "DEMO-1"].linear_url)
         expect(panel.get_by_text("В проекте пока нет задач.")).to_be_visible()
         live_issue_rows.append(native_issue)
         issue_page.evaluate("""() => {
@@ -155,6 +156,7 @@ def test_track_directly_inside_linear(tmp_path, inline_server, stale_worker, liv
         }""")
         row_timer = panel.locator("#issue-rows").get_by_text("DEMO-1", exact=True)
         expect(row_timer).to_be_visible(timeout=1800)
+        expect(panel.locator("#issue-rows a").first).to_have_attribute("href", native_issue["url"])
 
         second_browser = playwright.chromium.launch(**browser_options)
         tracker = second_browser.new_page()

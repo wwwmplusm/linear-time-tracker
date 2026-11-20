@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+import sqlite3
 from base64 import urlsafe_b64encode
 from urllib.parse import parse_qs, urlsplit
 
@@ -42,7 +43,10 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
     }.items():
         monkeypatch.setenv(name, value)
 
+    clock = linear.now_ms()
+    monkeypatch.setattr(linear, "now_ms", lambda: clock)
     exchanges = []
+    catalog_queries = []
     projects = {}
     attachments = {}
 
@@ -73,24 +77,26 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
             assert headers["Authorization"] == "Bearer initial-access"
             return {"data": {"viewer": {"name": "Владелец"}}}
         assert headers["Authorization"] == "Bearer next-access"
+        if "query Tracker" in query:
+            catalog_queries.append((query, variables))
         if "TrackerTeams" in query:
-            return {"data": {"page": result_page([{"id": TEAM, "name": "Команда разработки", "key": "DEV"}])}}
+            return {"data": {"organization": {"urlKey": "demo"}, "page": result_page([{"id": TEAM, "name": "Команда разработки", "key": "DEV"}])}}
         if "TrackerProjects" in query:
             assert variables["team"] == TEAM
-            return {"data": {"team": {
-                "name": "Команда разработки", "page": result_page([{"id": PROJECT, "name": "Разработка"}]),
+            return {"data": {"organization": {"urlKey": "demo"}, "team": {
+                "name": "Команда разработки", "key": "DEV", "page": result_page([{"id": PROJECT, "name": "Разработка", "url": "https://linear.app/demo/project/dev"}]),
             }}}
         if "TrackerUnassigned" in query:
             assert variables["team"] == TEAM and variables["filter"]["project"] == {"null": True}
-            return {"data": {"team": {
-                "name": "Команда разработки",
-                "page": result_page([{"id": UNASSIGNED, "name": "Задача без проекта", "identifier": "DEV-2"}]),
+            return {"data": {"organization": {"urlKey": "demo"}, "team": {
+                "name": "Команда разработки", "key": "DEV",
+                "page": result_page([{"id": UNASSIGNED, "name": "Задача без проекта", "identifier": "DEV-2", "url": "https://linear.app/demo/issue/DEV-2"}]),
             }}}
         if "TrackerIssues" in query:
             assert variables["team"] == TEAM and variables["project"] == PROJECT
             assert variables["membership"] == variables["filter"]["team"] == {"id": {"eq": TEAM}}
             term = variables["filter"].get("title", {}).get("containsIgnoreCase", "")
-            issue = {"id": ISSUE, "name": "Первая задача", "identifier": "DEV-1"}
+            issue = {"id": ISSUE, "name": "Первая задача", "identifier": "DEV-1", "url": "https://linear.app/demo/issue/DEV-1"}
             if variables["after"]:
                 assert variables["after"] == "next/page"
                 issue_page = result_page([], previous_cursor="previous/page")
@@ -100,16 +106,17 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
                 issue_page = result_page(nodes, next_cursor="next/page" if not term else None)
             return {"data": {
                 "team": {"name": "Команда разработки"},
-                "project": {"name": "Разработка", "teams": {"nodes": [{"id": TEAM}]}, "page": issue_page},
+                "project": {"name": "Разработка", "url": "https://linear.app/demo/project/dev", "teams": {"nodes": [{"id": TEAM}]}, "page": issue_page},
             }}
         if "project(id:" in query:
             assert variables["id"] == PROJECT
-            return {"data": {"project": {"id": PROJECT, "name": "Разработка"}}}
+            return {"data": {"project": {"id": PROJECT, "name": "Разработка", "url": "https://linear.app/demo/project/dev"}}}
         if "issue(id:" in query:
             issue_id = variables["id"]
             assert issue_id in {ISSUE, UNASSIGNED}
             return {"data": {"issue": {
                 "id": issue_id, "identifier": "DEV-1" if issue_id == ISSUE else "DEV-2",
+                "url": "https://linear.app/demo/issue/" + ("DEV-1" if issue_id == ISSUE else "DEV-2"),
                 "title": "Первая задача" if issue_id == ISSUE else "Задача без проекта",
                 "team": {"id": TEAM}, "project": {"id": PROJECT} if issue_id == ISSUE else None,
             }}}
@@ -166,8 +173,16 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
         start_url = project_page.replace("/linear?", "/linear/targets/start?")
         listed_issues = browser.get(project_page)
         sidebar, workspace = listed_issues.text.split('<main class="workspace">', 1)
+        assert 'href="https://linear.app/demo/team/DEV/all"' in sidebar
+        assert 'href="https://linear.app/demo/issue/DEV-1"' in workspace
+        assert 'href="https://linear.app/demo/project/dev"' in workspace
         assert "Первая задача" in workspace and "Без проекта" not in workspace
         assert "Без проекта" in sidebar and "Разработка" in sidebar
+        calls = len(catalog_queries)
+        browser.get(project_page)
+        assert len(catalog_queries) == calls
+        rev = re.search(r'data-revision="([^"]+)"', listed_issues.text)[1]
+        assert browser.get("/linear/state", headers={"X-Timer-Revision": rev}).status_code == 204
         assert "after=next%2Fpage" in listed_issues.text
         assert "before=previous%2Fpage" in browser.get(project_page + "&after=next%2Fpage").text
         assert "Совпадений нет" in browser.get(project_page + "&q=missing").text
@@ -218,7 +233,13 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
         assert exchanges[1]["grant_type"] == "refresh_token"
         assert len(exchanges) == 2
 
+    # Simulate targets imported by an older tracker, before source URLs were stored.
+    with sqlite3.connect(tmp_path / "tracker.sqlite3") as db:
+        db.execute("ALTER TABLE linear_targets DROP COLUMN linear_url")
     with TestClient(create_app(), base_url=BASE_URL) as restarted:
         sign_in(restarted)
+        old_link = restarted.get(f"/linear/source/{ISSUE}", follow_redirects=False)
+        assert old_link.headers["location"] == "https://linear.app/demo/issue/DEV-1"
+        assert 'href="https://linear.app/demo/issue/DEV-1"' in restarted.get(f"/t/linear-{ISSUE}").text
         assert "Владелец" in restarted.get("/linear").text
         assert "Первая задача" in restarted.get(f"/t/linear-{ISSUE}").text

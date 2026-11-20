@@ -1,0 +1,4 @@
+{% macro source_link(url, name, label="") -%}
+  {% if url %}<a class="source-link" href="{{ url }}" target="_blank" rel="noopener noreferrer"
+    aria-label="Открыть {{ name }} в Linear" title="Открыть {{ name }} в Linear">{{ label }}<span aria-hidden="true">↗</span></a>{% endif %}
+{%- endmacro %}

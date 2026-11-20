@@ -86,6 +86,22 @@ function show(expanded) {
   if (expanded) loadIssues(true);
 }
 
+function sourceName(name, href) {
+  const legacy = typeof href === "string" && /^\/linear\/source\/[0-9a-f-]{36}$/.test(href);
+  const link = legacy ? new URL(href, state.trackerOrigin).href
+    : href?.startsWith("https://linear.app/") ? href : null;
+  const element = document.createElement(link ? "a" : "span");
+  element.textContent = name;
+  if (link) {
+    element.href = link;
+    element.target = "_blank";
+    element.rel = "noopener noreferrer";
+    element.className = "linear-source";
+    element.title = "Открыть в Linear";
+  }
+  return element;
+}
+
 function renderIssueRows() {
   if (projectIssues.hidden || !state) return;
   const active = new Map(state.active.map(row => [row.target, row]));
@@ -100,8 +116,7 @@ function renderIssueRows() {
     entry.className = "entry";
     const info = document.createElement("div");
     info.className = "entry-info";
-    const name = document.createElement("p");
-    name.textContent = issue.title;
+    const name = sourceName(issue.title, issue.url);
     const identifier = document.createElement("p");
     identifier.className = "subtle";
     identifier.textContent = issue.identifier;
@@ -220,8 +235,7 @@ function renderList(rows, id, timezone) {
     entry.toggleAttribute("data-paused", paused);
     const info = document.createElement("div");
     info.className = "entry-info";
-    const name = document.createElement("p");
-    name.textContent = row.name;
+    const name = sourceName(row.name, row.linearUrl);
     const times = document.createElement("p");
     times.className = "subtle";
     times.textContent = row.ended === null
@@ -266,7 +280,7 @@ function renderList(rows, id, timezone) {
 }
 
 function render(data, capabilities) {
-  state = data;
+  state = { ...data, trackerOrigin: capabilities.tracker };
   projectIssuesSupported = capabilities.projectIssues === true;
   timerControlsSupported = capabilities.timerControls === true && data.timerControls === true;
   syncedAt = performance.now();
@@ -275,7 +289,7 @@ function render(data, capabilities) {
   toggleLabel.textContent = toggleText + (data.active.length ? " · " + data.active.length : "");
   byId("target-kind").textContent = project ? "Проект" : "Задача";
   byId("target-kind").hidden = false;
-  byId("target").textContent = data.target.name;
+  byId("target").replaceChildren(sourceName(data.target.name, data.target.linear_url || "https://linear.app" + path));
   byId("target").hidden = false;
   byId("setup").hidden = true;
   sections.hidden = false;
