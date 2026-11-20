@@ -77,6 +77,12 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
             assert headers["Authorization"] == "Bearer initial-access"
             return {"data": {"viewer": {"name": "Владелец"}}}
         assert headers["Authorization"] == "Bearer next-access"
+        if "TrackerIssueSearch" in query:
+            assert variables == {"term": "DEV-2"}
+            return {"data": {"results": result_page([{
+                "id": UNASSIGNED, "identifier": "DEV-2", "title": "Задача без проекта",
+                "team": {"name": "Команда разработки"}, "project": None,
+            }])}}
         if "query Tracker" in query:
             catalog_queries.append((query, variables))
         if "TrackerTeams" in query:
@@ -226,6 +232,19 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
             data={"kind": "issue", "reference": UNASSIGNED, "csrf": csrf, "key": field(unassigned, "key")},
         )
         assert f'data-active-target="linear-{UNASSIGNED}"' in unassigned_start.text
+
+        found = browser.get("/linear/focus/search", params={"q": "DEV-2"})
+        assert [item["id"] for item in found.json()] == [UNASSIGNED]
+        focus_form = {"reference": ISSUE, "csrf": csrf}
+        assert browser.post("/linear/focus", data={**focus_form, "csrf": "invalid"}).status_code == 403
+        for _ in range(2):
+            assert browser.post("/linear/focus", data=focus_form).json() == {"url": f"/t/linear-{ISSUE}"}
+        focus_page = browser.get("/linear/state", headers={"X-Timer-Revision": rev})
+        assert focus_page.text.count(f'action="/linear/focus/{ISSUE}/remove"') == 1
+        assert f'data-active-target="linear-{ISSUE}"' not in focus_page.text
+        assert browser.post(f"/linear/focus/{ISSUE}/remove", data={"csrf": csrf}).status_code == 204
+        assert f"/linear/focus/{ISSUE}/remove" not in browser.get("/linear/state").text
+        assert browser.get(f"/t/linear-{ISSUE}").status_code == 200
 
         assert list(projects.values())[0]["url"] == f"{TRACKER_ORIGIN}/t/linear-{PROJECT}"
         assert list(projects.values())[0]["label"] == "Таймер"

@@ -54,3 +54,47 @@
     {% endif %}
   </section>
 {%- endmacro %}
+
+{% macro focus_tasks() -%}
+{% if linear_enabled %}
+<section class="focus-list" aria-labelledby="focus-heading">
+  <div class="section-heading">
+    <h2 id="focus-heading">В фокусе</h2>
+    {% if focus %}<span class="count">{{ focus | length }}</span>{% endif %}
+  </div>
+  {% if focus %}
+  <ul class="entries">
+    {% for slug in focus if slug in targets %}
+    {% set item = targets[slug] %}
+    <li class="entry">
+      <div class="entry-main">{{ target_name(slug) }}</div>
+      <div class="focus-actions">
+        {% if active | selectattr("target", "eq", slug) | first %}
+        <a class="quiet" href="{{ item.url }}">К таймеру</a>
+        {% else %}
+        <form method="post" action="{{ item.url }}/start">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="key" value="{{ start_key }}">
+          <button type="submit" class="secondary" aria-label="Запустить таймер «{{ item.name }}»">Запустить</button>
+        </form>
+        {% endif %}
+        <form method="post" action="/linear/focus/{{ slug[7:] }}/remove" data-remove-focus>
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="quiet" aria-label="Убрать из фокуса «{{ item.name }}»" title="Убрать из фокуса">×</button>
+        </form>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <button type="button" class="focus-add" data-open-focus><span class="icon icon-plus" aria-hidden="true"></span>Добавить задачу в фокус</button>
+</section>
+{% endif %}
+{%- endmacro %}
+
+{% macro timer_board(base_url, query="") -%}
+  <div class="timer-board{% if linear_enabled %} with-focus{% endif %}">
+    {{ active_timers(base_url, query) }}
+    {{ focus_tasks() }}
+  </div>
+{%- endmacro %}

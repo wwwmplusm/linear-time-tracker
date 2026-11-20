@@ -167,6 +167,9 @@ def create_app() -> FastAPI:
     def timer_revision(active) -> str:
         return str(tuple((row["id"], row["version"]) for row in active))
 
+    def focus_revision(focus) -> str:
+        return hashlib.sha256(",".join(focus).encode()).hexdigest()[:16]
+
     def linear_targets():
         with db.transaction() as conn:
             return conn.execute("SELECT * FROM linear_targets ORDER BY kind DESC, name, id").fetchall()
@@ -220,10 +223,12 @@ def create_app() -> FastAPI:
         form: dict | None = None,
     ):
         active, personal, agents = db.snapshot()
+        focus = db.focus_tasks() if linear else ()
         revision = ".".join((
             timer_revision(active),
             str(tuple(row["id"] for row in personal)),
             str(tuple(row["id"] for row in agents)),
+            focus_revision(focus),
         ))
         if partial and request.headers.get("X-Timer-Revision") == revision:
             return Response(status_code=204, headers={"X-Tracker-Now": str(now_ms())})
@@ -236,6 +241,7 @@ def create_app() -> FastAPI:
             "csrf": csrf_token(token),
             "start_key": token_urlsafe(24),
             "active": active,
+            "focus": focus,
             "personal": personal,
             "agents": agents,
             "running": next((row for row in active if row["target"] == target.slug), None),
@@ -486,12 +492,15 @@ def create_app() -> FastAPI:
             "exchange": "Не удалось завершить подключение. Проверьте настройки OAuth и попробуйте снова.",
         }
 
-        def linear_timer_state(token: str, selection: LinearBrowse, active, rows=None) -> dict:
+        def linear_timer_state(token: str, selection: LinearBrowse, active, focus, rows=None) -> dict:
             return {
                 "active": active,
                 "targets": all_targets(rows),
                 "now": now_ms(),
-                "revision": timer_revision(active),
+                "revision": timer_revision(active) + "." + focus_revision(focus),
+                "focus": focus,
+                "linear_enabled": True,
+                "start_key": token_urlsafe(24),
                 "csrf": csrf_token(token),
                 "selection": selection,
             }
@@ -515,7 +524,6 @@ def create_app() -> FastAPI:
             error: str | None = None, message: str | None = None,
         ):
             connection = linear.connection()
-            rows = linear_targets()
             results = None
             browse_error = None
             if connection:
@@ -524,8 +532,10 @@ def create_app() -> FastAPI:
                 except LinearError as failure:
                     browse_error = str(failure)
             page = results["page"]["pageInfo"] if results else {}
+            focus = db.focus_tasks()
+            rows = linear_targets()
             context = {
-                **linear_timer_state(token, selection, db.active_timers(), rows),
+                **linear_timer_state(token, selection, db.active_timers(), focus, rows),
                 **(linear_navigation(selection, results) if results else {}),
                 "page_title": "Linear",
                 "linear_enabled": True,
@@ -533,7 +543,6 @@ def create_app() -> FastAPI:
                 "account_name": connection["account_name"] if connection else None,
                 "saved_targets": [(tracker_target(row), row["reference"], row["id"]) for row in rows],
                 "added": {row["id"]: tracker_target(row).url for row in rows},
-                "start_key": token_urlsafe(24),
                 "results": results,
                 "team_url": LinearBrowse(team=selection.team).url,
                 "clear_url": LinearBrowse(team=selection.team, project=selection.project).url,
@@ -575,9 +584,33 @@ def create_app() -> FastAPI:
             request: Request, selection: LinearBrowse = Depends(linear_selection), token: str = Depends(require_session),
         ):
             active = db.active_timers()
-            if request.headers.get("X-Timer-Revision") == timer_revision(active):
+            focus = db.focus_tasks()
+            if request.headers.get("X-Timer-Revision") == timer_revision(active) + "." + focus_revision(focus):
                 return Response(status_code=204, headers={"X-Tracker-Now": str(now_ms())})
-            return templates.TemplateResponse(request, "linear-state.html", linear_timer_state(token, selection, active))
+            return templates.TemplateResponse(request, "linear-state.html", linear_timer_state(token, selection, active, focus))
+
+        @app.get("/linear/focus/search")
+        def focus_search(
+            q: Annotated[str, Query(max_length=100)] = "",
+            token: str = Depends(require_session),
+        ):
+            try:
+                return linear.search_issues(q.strip())
+            except LinearError as error:
+                raise HTTPException(502, str(error)) from None
+
+        @app.post("/linear/focus")
+        def focus_add(reference: Annotated[UUID, Form()], token: str = Depends(require_post)):
+            try:
+                target, identifier = linear.resolve_target("issue", str(reference))
+            except LinearError as error:
+                raise HTTPException(502, str(error)) from None
+            db.add_focus_task(target, identifier)
+            return {"url": target.url}
+
+        @app.post("/linear/focus/{target_id}/remove", status_code=204)
+        def focus_remove(target_id: UUID, token: str = Depends(require_post)):
+            db.remove_focus_task(str(target_id))
 
         @app.get("/linear/source/{target_id}")
         def source_link(target_id: UUID, token: str = Depends(require_session)):
@@ -607,6 +640,7 @@ def create_app() -> FastAPI:
             panel_workspace.cache_clear()
             panel_target.cache_clear()
             linear._browse.cache_clear()
+            linear._search_issues.cache_clear()
             return RedirectResponse("/linear", status_code=303)
 
         @app.post("/linear/targets")

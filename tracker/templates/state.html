@@ -1,5 +1,5 @@
 {% from "source-link.html" import source_link %}
-{% from "timers.html" import target_name, timestamp, active_timers with context %}
+{% from "timers.html" import target_name, timestamp, timer_board with context %}
 
 {% macro journal(title, rows, id, empty) -%}
   <section aria-labelledby="{{ id }}" id="{{ id }}-journal" class="journal">
@@ -40,8 +40,7 @@
 {%- endmacro %}
 
 <div id="tracker-state" data-revision="{{ revision }}" data-now="{{ now }}" data-target="{{ target.url }}" data-state-url="{{ target.url }}/state">
-  {{ active_timers(target.url) }}
-  <section class="selected">
+  <section class="selected task-header">
     <div>
       <p class="context">{{ "Проект" if target.kind == "project" else "Задача" }}</p>
       <div class="source-title"><h1>{{ target.name }}</h1>{{ source_link(target.source_href, target.name) }}</div>
@@ -58,6 +57,8 @@
     </form>
     {% endif %}
   </section>
+
+  {{ timer_board(target.url) }}
 
   <div class="journals" role="group" aria-label="Журнал. Часовой пояс {{ timezone }}">
     {{ journal("Личное время", personal, "personal", "Нет завершённых интервалов") }}

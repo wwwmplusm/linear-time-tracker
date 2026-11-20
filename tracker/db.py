@@ -69,6 +69,11 @@ CREATE TABLE IF NOT EXISTS linear_targets (
     project_link_id TEXT NOT NULL,
     linear_url TEXT
 );
+
+CREATE TABLE IF NOT EXISTS focus_tasks (
+    target_id TEXT PRIMARY KEY REFERENCES linear_targets(id),
+    added_ms INTEGER NOT NULL
+);
 """
 
 POSTGRES_LOCK_NAMESPACE = 1279872596
@@ -233,6 +238,23 @@ class Database:
     def register_linear_target(self, target: Target, reference: str) -> None:
         with self.transaction(write=True) as conn:
             self._register_linear_target(conn, target, reference)
+
+    def focus_tasks(self) -> tuple[str, ...]:
+        with self.transaction() as conn:
+            rows = conn.execute("SELECT target_id FROM focus_tasks ORDER BY added_ms DESC, target_id").fetchall()
+            return tuple("linear-" + row["target_id"] for row in rows)
+
+    def add_focus_task(self, target: Target, reference: str) -> None:
+        with self.transaction(write=True) as conn:
+            self._register_linear_target(conn, target, reference)
+            conn.execute(
+                "INSERT INTO focus_tasks VALUES (?, ?) ON CONFLICT(target_id) DO NOTHING",
+                (target.slug.removeprefix("linear-"), now_ms()),
+            )
+
+    def remove_focus_task(self, target_id: str) -> None:
+        with self.transaction(write=True) as conn:
+            conn.execute("DELETE FROM focus_tasks WHERE target_id = ?", (target_id,))
 
     @staticmethod
     def _active_timers(conn: sqlite3.Connection | PostgresConnection) -> list[Row]:

@@ -319,6 +319,29 @@ class LinearIntegration:
     def workspace(self) -> str:
         return _graphql(self.access_token(), "query { organization { urlKey } }", {})["organization"]["urlKey"]
 
+    def search_issues(self, term: str) -> list[dict]:
+        return self._search_issues(self.access_token(), term, now_ms() // 30_000)
+
+    @lru_cache(maxsize=64)
+    def _search_issues(self, token: str, term: str, bucket: int) -> list[dict]:
+        if term:
+            data = _graphql(token, """
+                query TrackerIssueSearch($term: String!) {
+                    results: searchIssues(term: $term, first: 12, includeArchived: true, includeComments: false) {
+                        nodes { id identifier title team { name } project { name } }
+                    }
+                }
+            """, {"term": term})
+        else:
+            data = _graphql(token, """
+                query TrackerRecentIssues {
+                    results: issues(first: 12, orderBy: updatedAt) {
+                        nodes { id identifier title team { name } project { name } }
+                    }
+                }
+            """, {})
+        return data["results"]["nodes"]
+
     def project_issues(self, project_id: str, after: str | None, *, limit: int = 8) -> dict:
         data = _graphql(
             self.access_token(),
