@@ -74,6 +74,17 @@ CREATE TABLE IF NOT EXISTS focus_tasks (
     target_id TEXT PRIMARY KEY REFERENCES linear_targets(id),
     added_ms INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ticktick_targets (
+    slug TEXT PRIMARY KEY,
+    name TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ticktick_sessions (
+    source_id TEXT PRIMARY KEY,
+    interval_id INTEGER NOT NULL UNIQUE REFERENCES intervals(id),
+    type INTEGER NOT NULL CHECK (type IN (0, 1))
+);
 """
 
 POSTGRES_LOCK_NAMESPACE = 1279872596
@@ -82,6 +93,8 @@ POSTGRES_WRITE_LOCK = 2
 POSTGRES_LINEAR_LOCK = 3
 
 INTERVAL_FIELDS = {
+    "pomo_ms": "INTEGER",
+    "overtime_pending": "INTEGER NOT NULL DEFAULT 0",
     "worked_ms": "INTEGER",
     "segment_started_ms": "INTEGER",
     "paused_ms": "INTEGER",
@@ -187,27 +200,51 @@ class Database:
             with self.local_linear_lock:
                 yield
 
-    def start(self, target: Target, request_key: str, *, linear_reference: str | None = None) -> None:
+    # The deadline follows the current running segment, so time on pause never
+    # counts. Materialize expiry at that deadline even after an offline restart.
+    _deadline = "coalesce(segment_started_ms, started_ms) + pomo_ms - coalesce(worked_ms, 0)"
+    _due = f"ended_ms IS NULL AND paused_ms IS NULL AND pomo_ms IS NOT NULL AND {_deadline} <= ?"
+
+    @contextmanager
+    def timer_transaction(self, *, write: bool = False):
+        if not write:
+            with self.transaction() as conn:
+                now = now_ms()
+                if not conn.execute(f"SELECT 1 FROM intervals WHERE {self._due} LIMIT 1", (now,)).fetchone():
+                    yield conn, now
+                    return
         with self.transaction(write=True) as conn:
+            now = now_ms()
+            conn.execute(
+                f"""UPDATE intervals SET ended_ms = {self._deadline}, worked_ms = pomo_ms,
+                    overtime_pending = 1, version = version + 1 WHERE {self._due}""", (now,)
+            )
+            yield conn, now
+
+    def start(self, target: Target, request_key: str, *, linear_reference: str | None = None,
+              pomo_minutes: int | None = None) -> None:
+        with self.timer_transaction(write=True) as (conn, now):
             if linear_reference is not None:
                 self._register_linear_target(conn, target, linear_reference)
-            self._start(conn, target.slug, request_key)
+            self._start(conn, target.slug, request_key, now, pomo_minutes)
 
     @staticmethod
-    def _start(conn: sqlite3.Connection | PostgresConnection, slug: str, request_key: str) -> None:
+    def _start(conn: sqlite3.Connection | PostgresConnection, slug: str, request_key: str,
+               now: int, pomo_minutes: int | None = None) -> None:
         seen = conn.execute(
             "SELECT 1 FROM starts WHERE target = ? AND request_key = ?", (slug, request_key)
         ).fetchone()
         if seen:
             return
         active = conn.execute(
-            "SELECT id FROM intervals WHERE target = ? AND ended_ms IS NULL", (slug,)
+            "SELECT id FROM intervals WHERE target = ? AND (ended_ms IS NULL OR overtime_pending = 1)", (slug,)
         ).fetchone()
         if active:
             interval_id = active["id"]
         else:
             interval_id = conn.execute(
-                "INSERT INTO intervals (target, started_ms) VALUES (?, ?) RETURNING id", (slug, now_ms())
+                "INSERT INTO intervals (target, started_ms, pomo_ms) VALUES (?, ?, ?) RETURNING id",
+                (slug, now, pomo_minutes * 60_000 if pomo_minutes is not None else None),
             ).fetchone()["id"]
         conn.execute(
             "INSERT INTO starts (target, request_key, interval_id) VALUES (?, ?, ?)",
@@ -215,13 +252,13 @@ class Database:
         )
 
     def restart(self, interval_id: int, request_key: str) -> bool:
-        with self.transaction(write=True) as conn:
+        with self.timer_transaction(write=True) as (conn, now):
             row = conn.execute(
                 "SELECT target FROM intervals WHERE id = ? AND ended_ms IS NOT NULL", (interval_id,)
             ).fetchone()
             if row is None:
                 return False
-            self._start(conn, row["target"], request_key)
+            self._start(conn, row["target"], request_key, now)
             return True
 
     @staticmethod
@@ -259,16 +296,15 @@ class Database:
     @staticmethod
     def _active_timers(conn: sqlite3.Connection | PostgresConnection) -> list[Row]:
         return conn.execute(
-            "SELECT * FROM intervals WHERE ended_ms IS NULL ORDER BY started_ms, id"
+            "SELECT * FROM intervals WHERE ended_ms IS NULL OR overtime_pending = 1 ORDER BY started_ms, id"
         ).fetchall()
 
     def active_timers(self) -> list[Row]:
-        with self.transaction() as conn:
+        with self.timer_transaction() as (conn, _):
             return self._active_timers(conn)
 
     def stop(self, interval_id: int) -> None:
-        with self.transaction(write=True) as conn:
-            now = now_ms()
+        with self.timer_transaction(write=True) as (conn, now):
             conn.execute(
                 """
                 UPDATE intervals SET
@@ -284,8 +320,7 @@ class Database:
             )
 
     def pause(self, interval_id: int, version: int) -> None:
-        with self.transaction(write=True) as conn:
-            now = now_ms()
+        with self.timer_transaction(write=True) as (conn, now):
             conn.execute(
                 """
                 UPDATE intervals SET
@@ -298,14 +333,79 @@ class Database:
             )
 
     def resume(self, interval_id: int, version: int) -> None:
-        with self.transaction(write=True) as conn:
+        with self.timer_transaction(write=True) as (conn, now):
             conn.execute(
                 """
                 UPDATE intervals SET segment_started_ms = greatest(paused_ms, ?),
                     paused_ms = NULL, version = version + 1
                 WHERE id = ? AND version = ? AND ended_ms IS NULL AND paused_ms IS NOT NULL
                 """,
-                (now_ms(), interval_id, version),
+                (now, interval_id, version),
+            )
+
+    def extend(self, interval_id: int, version: int) -> None:
+        with self.timer_transaction(write=True) as (conn, _):
+            conn.execute(
+                """UPDATE intervals SET pomo_ms = pomo_ms + 300000, version = version + 1
+                   WHERE id = ? AND version = ? AND ended_ms IS NULL AND pomo_ms IS NOT NULL""",
+                (interval_id, version),
+            )
+
+    def finish_overtime(self, interval_id: int, *, accept: bool) -> None:
+        with self.timer_transaction(write=True) as (conn, now):
+            conn.execute(
+                """UPDATE intervals SET overtime_pending = 0, version = version + 1,
+                       worked_ms = worked_ms + CASE WHEN ? THEN greatest(0, ? - ended_ms) ELSE 0 END,
+                       ended_ms = CASE WHEN ? THEN greatest(ended_ms, ?) ELSE ended_ms END
+                   WHERE id = ? AND overtime_pending = 1""",
+                (accept, now, accept, now, interval_id),
+            )
+
+    def finished_issue(self, interval_id: int) -> Row | None:
+        with self.transaction() as conn:
+            return conn.execute(
+                """SELECT t.id, t.name FROM intervals i JOIN linear_targets t ON i.target = 'linear-' || t.id
+                   WHERE i.id = ? AND i.ended_ms IS NOT NULL AND i.overtime_pending = 0 AND t.kind = 'issue'""",
+                (interval_id,),
+            ).fetchone()
+
+    def history_entry(self, kind: str, interval_id: int) -> Row | None:
+        table = "intervals" if kind == "personal" else "agent_runs"
+        with self.timer_transaction() as (conn, _):
+            return conn.execute(
+                f"SELECT * FROM {table} WHERE id = ? AND ended_ms IS NOT NULL", (interval_id,)
+            ).fetchone()
+
+    def edit_entry(self, kind: str, interval_id: int, original_start: int, original_end: int,
+                   start: int, end: int) -> bool:
+        with self.timer_transaction(write=True) as (conn, _):
+            condition = "WHERE id = ? AND started_ms = ? AND ended_ms = ?"
+            if kind == "personal":
+                # Preserve time excluded by pauses when correcting the boundaries.
+                query = """UPDATE intervals SET started_ms = ?, ended_ms = ?, version = version + 1,
+                    worked_ms = CASE WHEN worked_ms IS NOT NULL THEN
+                        greatest(0, worked_ms + ? - (ended_ms - started_ms)) END """
+                result = conn.execute(query + condition + " AND overtime_pending = 0",
+                                      (start, end, end - start, interval_id, original_start, original_end))
+            else:
+                result = conn.execute("UPDATE agent_runs SET started_ms = ?, ended_ms = ? " + condition,
+                                      (start, end, interval_id, original_start, original_end))
+            return result.rowcount == 1
+
+    def record_personal_time(self, target: str, request_key: str, start: int, finish: int) -> None:
+        with self.transaction(write=True) as conn:
+            seen = conn.execute(
+                "SELECT 1 FROM starts WHERE target = ? AND request_key = ?", (target, request_key)
+            ).fetchone()
+            if seen:
+                return
+            interval_id = conn.execute(
+                "INSERT INTO intervals (target, started_ms, ended_ms) VALUES (?, ?, ?) RETURNING id",
+                (target, start, finish),
+            ).fetchone()["id"]
+            conn.execute(
+                "INSERT INTO starts (target, request_key, interval_id) VALUES (?, ?, ?)",
+                (target, request_key, interval_id),
             )
 
     def record_agent_run(self, target: str, request_key: str, start: int, finish: int) -> None:
@@ -318,8 +418,18 @@ class Database:
                 (target, request_key, start, finish),
             )
 
+    def completed_sessions(self, start_ms: int, end_ms: int) -> list[Row]:
+        with self.timer_transaction() as (conn, _):
+            return conn.execute(
+                """
+                SELECT * FROM intervals WHERE ended_ms >= ? AND ended_ms < ?
+                ORDER BY ended_ms DESC, id DESC
+                """,
+                (start_ms, end_ms),
+            ).fetchall()
+
     def snapshot(self) -> tuple[list[Row], list[Row], list[Row]]:
-        with self.transaction() as conn:
+        with self.timer_transaction() as (conn, _):
             active = self._active_timers(conn)
             personal = conn.execute(
                 """

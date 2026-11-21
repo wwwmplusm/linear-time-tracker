@@ -2,10 +2,16 @@
 <nav id="workspace-nav" class="target-nav" aria-label="Навигация">
   <div class="targets">
     {% if linear_enabled %}
-    <a href="/linear"{% if selection is defined and not selection.team %} aria-current="page"{% endif %}>
+    <a href="/dashboard"{% if dashboard %} aria-current="page"{% endif %}>
+      <span class="target-icon dashboard-icon" aria-hidden="true"></span><span class="target-name">Дашборд</span>
+    </a>
+    <a href="/linear"{% if not dashboard and selection is defined and not selection.team %} aria-current="page"{% endif %}>
       <span class="target-icon team" aria-hidden="true"></span><span class="target-name">Команды Linear</span>
     </a>
     {% endif %}
+    <a href="/statistics"{% if is_statistics %} aria-current="page"{% endif %}>
+      <span class="target-icon statistics-icon" aria-hidden="true"></span><span class="target-name">Статистика</span>
+    </a>
     <a href="{{ journal_url }}#personal"><span class="target-icon project" aria-hidden="true"></span><span class="target-name">Журнал</span></a>
     {% if menu_teams %}
     <p class="nav-title">Команды</p>
@@ -32,9 +38,9 @@
       <span class="target-icon issue" aria-hidden="true"></span><span class="target-name">Без проекта</span>
     </a>
     {% endif %}
-    {% if target is defined %}
+    {% if target is defined or (is_statistics and not linear_enabled) %}
     <p class="nav-title">Проекты и задачи</p>
-    {% for item in targets.values() %}
+    {% for item in targets.values() if not item.slug.startswith('ticktick-') or item == target %}
     <div class="nav-row">
     <a href="{{ item.url }}"{% if item == target %} aria-current="page"{% endif %}>
       <span class="target-icon {{ item.kind }}" aria-hidden="true"></span><span class="target-name">{{ item.name }}</span>

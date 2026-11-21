@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block head %}<script src="{{ asset('tracker.js') }}" defer></script>{% endblock %}
+{% block content %}
+  <p class="notice error" id="sync-error" role="status" hidden>Не удалось обновить таймеры. Повторим попытку.</p>
+  <header class="linear-intro">
+    <div class="linear-title">
+      <h1>Дашборд</h1>
+      <div class="statistics-links">
+        <a class="secondary" href="/statistics">Статистика</a>
+        <a class="secondary" href="/linear">Команды Linear</a>
+      </div>
+    </div>
+  </header>
+  {% include "linear-state.html" %}
+{% endblock %}

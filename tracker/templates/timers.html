@@ -12,6 +12,10 @@
   <time datetime="{{ ms | utc }}">{{ local.strftime("%d.%m.%Y %H:%M:%S" if show_date else "%H:%M:%S") }}</time>
 {%- endmacro %}
 
+{% macro pomo_button(name) -%}
+  <button type="button" class="secondary" data-pomo="{{ name }}" aria-label="Помодоро для «{{ name }}»">Помодоро</button>
+{%- endmacro %}
+
 {% macro active_timers(base_url, query="") -%}
 <section class="active" aria-labelledby="active">
     <div class="section-heading">
@@ -24,14 +28,39 @@
       {% set paused = row.paused_ms is not none %}
       {% set action = "resume" if paused else "pause" %}
       {% set name = targets[row.target].name if row.target in targets else row.target %}
-      <li class="entry active-entry" data-active-target="{{ row.target }}"{% if paused %} data-paused{% endif %}>
+      <li class="entry active-entry" data-active-target="{{ row.target }}"{% if row.overtime_pending %} data-overtime{% endif %}{% if paused %} data-paused{% endif %}>
         <span class="status-dot" aria-hidden="true"></span>
         <div class="entry-main">
           {{ target_name(row.target) }}
-          <div class="muted entry-dates">{% if paused %}На паузе · {% endif %}С {{ timestamp(row.started_ms, row.started_ms | local_time) }}</div>
+          <div class="muted entry-dates">
+            {% if row.overtime_pending %}
+              Помодоро завершён · {{ row.pomo_ms // 60000 }} мин в журнале
+            {% else %}
+              {% if row.pomo_ms %}Помодоро · {{ row.pomo_ms // 60000 }} мин · {% endif %}
+              {% if paused %}На паузе · {% endif %}С {{ timestamp(row.started_ms, row.started_ms | local_time) }}
+            {% endif %}
+          </div>
         </div>
         <div class="timer-actions">
-          <span class="duration"{% if not paused %} data-start="{{ row | running_since }}" data-worked="{{ row.worked_ms or 0 }}"{% endif %}>{{ (row | elapsed_ms(now)) | clock }}</span>
+          {% if row.overtime_pending %}
+          <span class="muted">Сверх таймера</span>
+          <span class="duration" data-start="{{ row.ended_ms }}" data-worked="0">{{ (now - row.ended_ms) | clock }}</span>
+          {% for choice, label in [('accept', 'Засчитать'), ('discard', 'Отбросить')] %}
+          <form method="post" action="{{ base_url }}/overtime/{{ choice }}/{{ row.id }}{{ query }}">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button class="{{ 'primary' if choice == 'accept' else 'secondary' }}" {% if choice == 'accept' %}id="timer-{{ row.id }}"{% endif %}>{{ label }}</button>
+          </form>
+          {% endfor %}
+          {% else %}
+          {% set elapsed = row | elapsed_ms(now) %}
+          <span class="duration"{% if row.pomo_ms %} data-limit="{{ row.pomo_ms }}"{% endif %}{% if not paused %} data-start="{{ row | running_since }}" data-worked="{{ row.worked_ms or 0 }}"{% endif %}>{{ ([0, row.pomo_ms - elapsed] | max if row.pomo_ms else elapsed) | clock }}</span>
+          {% if row.pomo_ms %}
+          <form method="post" action="{{ base_url }}/timers/extend/{{ row.id }}{{ query }}">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="version" value="{{ row.version }}">
+            <button class="secondary" aria-label="Продлить помодоро на 5 минут">+5 мин</button>
+          </form>
+          {% endif %}
           <form method="post" action="{{ base_url }}/timers/{{ action }}/{{ row.id }}{{ query }}">
             <input type="hidden" name="csrf" value="{{ csrf }}">
             <input type="hidden" name="version" value="{{ row.version }}">
@@ -45,6 +74,7 @@
               <span class="icon icon-stop" aria-hidden="true"></span><span class="control-caption">Остановить</span>
             </button>
           </form>
+          {% endif %}
         </div>
       </li>
       {% endfor %}
@@ -76,6 +106,7 @@
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="key" value="{{ start_key }}">
           <button type="submit" class="secondary" aria-label="Запустить таймер «{{ item.name }}»">Запустить</button>
+          {{ pomo_button(item.name) }}
         </form>
         {% endif %}
         <form method="post" action="/linear/focus/{{ slug[7:] }}/remove" data-remove-focus>

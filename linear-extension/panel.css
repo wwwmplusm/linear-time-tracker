@@ -159,7 +159,7 @@ h2 { font-size: 13px; font-weight: 650; }
 }
 #active .entry[data-paused] .entry-info::before { background: var(--muted); }
 .entry-info { min-width: 0; }
-.entry-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.entry-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; align-items: center; max-width: 62%; }
 .duration { color: var(--secondary); font: 12px var(--digits); white-space: nowrap; }
 #active .duration { color: var(--ink); font-size: 14px; }
 .subtle { font-variant-numeric: tabular-nums; }

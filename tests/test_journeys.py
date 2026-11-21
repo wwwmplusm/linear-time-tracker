@@ -123,7 +123,7 @@ def test_parallel_timers_sync_and_survive_restart(server, browsers):
 
     phone.get_by_role("button", name="Остановить таймер «Задача A»", exact=True).click()
     expect(active_row(phone, "Задача A")).to_have_count(0)
-    expect(phone.locator("#personal-journal li").get_by_role("link")).to_have_text("Задача A")
+    expect(phone.locator("#personal-journal .entry-main").get_by_role("link")).to_have_text("Задача A")
     with laptop.expect_response(lambda res: res.url.endswith("/t/issue-b/state")):
         laptop.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
     expect(laptop.locator(".active-entry")).to_have_count(1)
@@ -246,3 +246,39 @@ def test_overlapping_agent_runs_have_individual_durations(server, browsers):
     )
     expect(laptop.locator("#personal-journal li")).to_have_count(0)
     assert server.rows("SELECT count(DISTINCT id) FROM agent_runs WHERE target = 'issue-a'") == [(2,)]
+
+def test_pomodoro_overtime_and_edit(server, browsers):
+    laptop, phone = browsers
+    sign_in(laptop, "issue-a")
+    sign_in(phone, "issue-b")
+    laptop.get_by_role("button", name="Помодоро для «Задача A»").click()
+    dialog = laptop.get_by_role("dialog", name="Помодоро")
+    dialog.get_by_label("Длительность, мин").fill("60")
+    dialog.get_by_role("button", name="Начать помодоро").click()
+    row = active_row(laptop, "Задача A")
+    expect(row).to_contain_text("Помодоро · 60 мин")
+    row.get_by_role("button", name="Продлить помодоро на 5 минут").click()
+    expect(row).to_contain_text("Помодоро · 65 мин")
+
+    # Move the start into the past to simulate returning after a long absence.
+    with sqlite3.connect(server.database) as conn:
+        conn.execute("UPDATE intervals SET started_ms = started_ms - 4200000")
+    phone.reload()
+    overtime = active_row(phone, "Задача A")
+    expect(overtime).to_contain_text("65 мин в журнале")
+    expect(phone.locator("#personal-journal .duration")).to_have_text("01:05:00")
+    overtime.get_by_role("button", name="Засчитать").click()
+    expect(overtime).to_have_count(0)
+    assert server.rows("SELECT count(*) FROM intervals") == [(1,)]
+    worked, = server.rows("SELECT worked_ms FROM intervals")[0]
+    assert 4200000 <= worked < 4230000
+
+    phone.locator("#personal-journal").get_by_role("link", name="Редактировать").click()
+    end = phone.get_by_label("Окончание")
+    end.fill("2025-01-01T10:10:00.123")
+    phone.get_by_role("button", name="Сохранить", exact=True).click()
+    expect(phone.get_by_role("alert")).to_contain_text("Окончание должно быть позже начала")
+    phone.get_by_label("Начало").fill("2025-01-01T09:10:00.123")
+    phone.get_by_role("button", name="Сохранить", exact=True).click()
+    expect(phone.locator("#personal-journal .duration")).to_have_text("01:00:00")
+    assert server.rows("SELECT count(*), worked_ms, started_ms % 1000 FROM intervals") == [(1, 3600000, 123)]

@@ -4,14 +4,33 @@
     <p class="notice error" id="sync-error" role="status" hidden>Не удалось обновить таймеры. Повторим попытку.</p>
     {% include "state.html" %}
 
+    <details class="manual" id="personal-time"{% if manual_open %} open{% endif %}>
+      <summary>Внести время задним числом</summary>
+      <form method="post" action="{{ target.url }}/personal-time" class="interval-form">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="key" value="{{ manual_form.key }}">
+        <p class="muted">Часовой пояс · {{ timezone }}</p>
+        <div class="interval-fields">
+          <label>Дата и время старта
+            <input type="datetime-local" name="started" step="1" value="{{ manual_form.started }}" required{% if manual_error %} aria-describedby="personal-time-error"{% endif %}>
+          </label>
+          <label>Дата и время завершения
+            <input type="datetime-local" name="ended" step="1" value="{{ manual_form.ended }}" required{% if manual_error %} aria-describedby="personal-time-error"{% endif %}>
+          </label>
+        </div>
+        {% if manual_error %}<p id="personal-time-error" class="error" role="alert">{{ manual_error }}</p>{% endif %}
+        <button class="secondary" type="submit">Сохранить время</button>
+      </form>
+    </details>
+
     {% if target.kind == "issue" %}
     <details class="manual"{% if error %} open{% endif %}>
       <summary>Записать запуск агента</summary>
-      <form method="post" action="{{ target.url }}/agent-runs" class="agent-form">
+      <form method="post" action="{{ target.url }}/agent-runs" class="interval-form">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="key" value="{{ form.key }}">
         <p class="muted">Часовой пояс · {{ timezone }}</p>
-        <div class="agent-fields">
+        <div class="interval-fields">
           <label>Начало
             <input type="datetime-local" name="started" step="1" value="{{ form.started }}" required{% if error %} aria-describedby="agent-error"{% endif %}>
           </label>

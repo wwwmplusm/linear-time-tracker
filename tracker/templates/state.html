@@ -1,5 +1,5 @@
 {% from "source-link.html" import source_link %}
-{% from "timers.html" import target_name, timestamp, timer_board with context %}
+{% from "timers.html" import target_name, timestamp, timer_board, pomo_button with context %}
 
 {% macro journal(title, rows, id, empty) -%}
   <section aria-labelledby="{{ id }}" id="{{ id }}-journal" class="journal">
@@ -16,6 +16,9 @@
         </div>
         <div class="journal-actions">
           <span class="duration">{{ ((row | elapsed_ms(now)) if id == "personal" else (row.ended_ms - row.started_ms)) | clock }}</span>
+          {% if not row.overtime_pending %}
+          <a class="quiet" href="/history/{{ id }}/{{ row.id }}/edit">Редактировать</a>
+          {% endif %}
           {% if id == "personal" %}
           {% set name = targets[row.target].name if row.target in targets else row.target %}
           {% set open_timer = active | selectattr("target", "eq", row.target) | first | default(none) %}
@@ -47,13 +50,14 @@
     </div>
     {% if running %}
     <a class="running-label" id="target-action" href="#timer-{{ running.id }}">
-      <span class="status-dot" aria-hidden="true"></span>{{ "На паузе" if running.paused_ms is not none else "Таймер идёт" }}
+      <span class="status-dot" aria-hidden="true"></span>{{ "Сверх таймера" if running.overtime_pending else "На паузе" if running.paused_ms is not none else "Таймер идёт" }}
     </a>
     {% else %}
     <form method="post" action="{{ target.url }}/start">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="key" value="{{ start_key }}">
       <button class="primary" id="target-action" type="submit"><span class="icon icon-play" aria-hidden="true"></span>Запустить</button>
+      {{ pomo_button(target.name) }}
     </form>
     {% endif %}
   </section>

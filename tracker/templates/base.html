@@ -13,12 +13,12 @@
 <body>
   <header class="top">
     <div class="top-inner">
-      <a class="brand" href="/"><img src="{{ asset('assets/timer-mark.png') }}" width="24" height="24" alt="">Таймер</a>
+      <a class="brand" href="{{ '/dashboard' if linear_enabled else '/' }}"><img src="{{ asset('assets/timer-mark.png') }}" width="24" height="24" alt="">Таймер</a>
       <div class="header-actions">
         {{ source_link("https://linear.app", "рабочее пространство", "Linear") }}
       {% if csrf %}
         {% set running_count = active | selectattr("paused_ms", "none") | list | length %}
-        <a class="quiet timer-indicator"{% if active %} href="#active"{% else %} data-idle{% endif %}>
+        <a class="quiet timer-indicator"{% if active %} href="{{ active_url or '#active' }}"{% else %} data-idle{% endif %}>
           <span class="status-dot" aria-hidden="true"></span>
           <span id="timer-indicator-text">{% if active %}Идут {{ running_count }}{% if active | length > running_count %} · На паузе {{ active | length - running_count }}{% endif %}{% else %}Нет активных таймеров{% endif %}</span>
         </a>
@@ -31,21 +31,52 @@
     </div>
   </header>
   {% if csrf %}<div class="tracker-layout"><button class="nav-toggle" type="button" aria-expanded="false" aria-controls="workspace-nav">Навигация</button>{% include "sidebar.html" %}{% endif %}
-  <main class="{{ 'workspace' if csrf else 'page' }}">{% block content %}{% endblock %}</main>
+  <main class="{{ 'workspace' if csrf else 'page' }}">
+    {% if completion_prompt %}
+    <section class="completion-prompt" data-completion-prompt aria-label="Завершение задачи Linear">
+      <p role="status">Время сохранено · {{ completion_prompt.name }}</p>
+      <button class="secondary" type="button" data-complete-interval="{{ completion_prompt.interval }}">Завершить задачу в Linear</button>
+      <button class="quiet" type="button" data-dismiss>Закрыть</button>
+    </section>
+    {% endif %}
+    {% block content %}{% endblock %}</main>
   {% if csrf %}</div>{% endif %}
+  {% if start_key %}
+  <dialog class="focus-dialog" id="pomo-dialog" aria-labelledby="pomo-title">
+    <div class="focus-dialog-heading">
+      <h2 id="pomo-title">Помодоро</h2>
+      <form method="dialog"><button class="quiet" aria-label="Закрыть">×</button></form>
+    </div>
+    <p data-pomo-target></p>
+    <form method="post" class="interval-form" data-pomo-form>
+      <div data-pomo-fields></div>
+      <label>Длительность, мин<input type="number" name="pomo_minutes" min="1" max="1440" required value="25" autofocus></label>
+      <button type="submit" class="primary">Начать помодоро</button>
+    </form>
+  </dialog>
+  {% endif %}
   {% if csrf and linear_enabled %}
-  <dialog class="focus-dialog" id="focus-dialog" aria-labelledby="focus-title">
+  <dialog class="focus-dialog" id="focus-dialog" aria-labelledby="focus-title"{% if dashboard %} data-stay-on-dashboard{% endif %}>
     <div class="focus-dialog-heading">
       <h2 id="focus-title">Добавить задачу в фокус</h2>
       <form method="dialog"><button class="quiet" aria-label="Закрыть">×</button></form>
     </div>
-    <label class="focus-search">
-      <span class="focus-search-icon" aria-hidden="true"></span>
-      <input type="search" id="focus-query" aria-label="Поиск по всем задачам Linear" placeholder="Название задачи или ID" maxlength="100" autocomplete="off" autofocus>
-    </label>
-    <p class="muted" id="focus-status" role="status"></p>
-    <ul class="entries" id="focus-results" aria-label="Результаты поиска"></ul>
-    <div class="focus-shortcuts" aria-hidden="true"><span><kbd>↑</kbd><kbd>↓</kbd> Выбрать</span><span><kbd>↵</kbd> Добавить</span><span><kbd>Esc</kbd> Закрыть</span></div>
+    <div id="focus-issues">
+      <button class="quiet focus-switch" id="focus-browse" type="button">Перейти к проекту в Linear ↗</button>
+      <label class="focus-search">
+        <span class="focus-search-icon" aria-hidden="true"></span>
+        <input type="search" id="focus-query" aria-label="Поиск по всем задачам Linear" placeholder="Название задачи или ID" maxlength="100" autocomplete="off" autofocus>
+      </label>
+      <p class="muted" id="focus-status" role="status"></p>
+      <ul class="entries" id="focus-results" aria-label="Результаты поиска"></ul>
+      <div class="focus-shortcuts" aria-hidden="true"><span><kbd>↑</kbd><kbd>↓</kbd> Выбрать</span><span><kbd>↵</kbd> Добавить</span><span><kbd>Esc</kbd> Закрыть</span></div>
+    </div>
+    <section id="focus-destinations" hidden>
+      <button type="button" class="quiet" id="destination-back">← К поиску задач</button>
+      <p class="muted" id="destination-status" role="status"></p>
+      <ul class="entries" id="destination-list"></ul>
+      <button type="button" class="secondary" id="destination-more" hidden>Показать ещё</button>
+    </section>
   </dialog>
   <script src="{{ asset('focus.js') }}" defer></script>
   {% endif %}

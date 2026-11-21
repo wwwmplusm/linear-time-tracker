@@ -1,0 +1,60 @@
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tracker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: '0.13.9'
+          python-version: '3.11'
+          enable-cache: true
+      - run: uv run --locked playwright install --with-deps chromium
+      - run: ./scripts/test.sh
+
+  deploy:
+    name: Deploy to VPS
+    if: github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Deploy over SSH
+        env:
+          VPS_SSH_HOST: ${{ vars.VPS_SSH_HOST }}
+          VPS_SSH_KNOWN_HOSTS: ${{ vars.VPS_SSH_KNOWN_HOSTS }}
+          VPS_HEALTH_URL: ${{ vars.VPS_HEALTH_URL }}
+          VPS_DEPLOY_PATH: ${{ vars.VPS_DEPLOY_PATH }}
+          VPS_TRACKER_SERVICE: ${{ vars.VPS_TRACKER_SERVICE }}
+          VPS_DEPLOY_KEY: ${{ secrets.VPS_DEPLOY_KEY }}
+        run: |
+          : "${VPS_DEPLOY_KEY:?Set the VPS_DEPLOY_KEY secret}"
+          : "${VPS_SSH_KNOWN_HOSTS:?Set the pinned VPS SSH host key}"
+          install -d -m 700 ~/.ssh
+          umask 077
+          printf '%s\n' "$VPS_SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          export VPS_SSH_KEY_FILE="$RUNNER_TEMP/tracker-deploy-key"
+          printf '%s\n' "$VPS_DEPLOY_KEY" > "$VPS_SSH_KEY_FILE"
+          trap 'rm -f "$VPS_SSH_KEY_FILE"' EXIT
+          unset VPS_DEPLOY_KEY
+          ./scripts/deploy.sh

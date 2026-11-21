@@ -316,6 +316,33 @@ class LinearIntegration:
             raise LinearError("Этот проект больше не относится к выбранной команде.", kind="membership")
         return {"team": data["team"]["name"], "project": project["name"], "url": project["url"], "page": project["page"]}
 
+    def complete_issue(self, issue_id: str) -> str:
+        token = self.access_token()
+        issue = _graphql(token, """
+            query TrackerCompletionStates($id: String!) {
+                issue(id: $id) {
+                    state { type name }
+                    team { states(filter: {type: {eq: "completed"}}) { nodes { id name position } } }
+                }
+            }
+        """, {"id": issue_id}).get("issue")
+        if not issue:
+            raise LinearError("Задача недоступна в Linear.")
+        if issue["state"]["type"] == "completed":
+            return issue["state"]["name"]
+        states = issue["team"]["states"]["nodes"]
+        if not states:
+            raise LinearError("У команды нет статуса для завершённых задач.")
+        done = min(states, key=lambda state: (state["name"].casefold() != "done", state["position"], state["id"]))
+        update = _graphql(token, """
+            mutation TrackerCompleteIssue($id: String!, $state: String!) {
+                issueUpdate(id: $id, input: {stateId: $state}) { success issue { state { type name } } }
+            }
+        """, {"id": issue_id, "state": done["id"]})["issueUpdate"]
+        if not update["success"] or update["issue"]["state"]["type"] != "completed":
+            raise LinearError("Не удалось подтвердить завершение задачи в Linear.")
+        return update["issue"]["state"]["name"]
+
     def workspace(self) -> str:
         return _graphql(self.access_token(), "query { organization { urlKey } }", {})["organization"]["urlKey"]
 

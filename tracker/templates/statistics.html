@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% macro delta(value, duration=false) %}
+  <span class="statistics-delta{% if value > 0 %} statistics-increase{% endif %}">
+    {% if value == 0 %}Без изменений{% else %}{{ '+' if value > 0 else '−' }}{% if duration %}{{ value | abs | duration_label }}{% else %}{{ value | abs }}{% endif %}{% endif %}
+  </span>
+{% endmacro %}
+{% macro journal_rows(entries) %}
+  <ul class="statistics-entries">
+    {% for row, duration in entries %}
+      {% set target = targets.get(row.target) %}
+      {% set start = row.started_ms | local_time %}
+      {% set end = row.ended_ms | local_time %}
+      <li>
+        <span class="statistics-entry-name">{% if target %}<a href="{{ target.url }}">{{ target.name }}</a>{% else %}{{ row.target }}{% endif %}{% if not row.overtime_pending %} <a class="quiet" href="/history/personal/{{ row.id }}/edit?report=1">Редактировать</a>{% endif %}</span>
+        <span class="statistics-entry-time"><time datetime="{{ start.isoformat() }}">{{ start.strftime('%H:%M') }}{% if start.date() != end.date() %} · {{ start.date() | day_label }}{% endif %}</time> – <time datetime="{{ end.isoformat() }}">{{ end.strftime('%H:%M') }}</time></span>
+        <span class="statistics-duration">{{ duration | duration_label }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+{% endmacro %}
+{% block content %}
+  <div class="statistics">
+    <header class="statistics-heading">
+      <h1>Статистика</h1>
+      <nav class="statistics-periods" aria-label="Группировка по времени">
+        {% for key, label, url in period_links %}
+          <a class="quiet" href="{{ url }}"{% if key == period %} aria-current="page"{% endif %}>{{ label }}</a>
+        {% endfor %}
+      </nav>
+    </header>
+
+    <section class="statistics-summary" aria-labelledby="statistics-period">
+      <div class="statistics-toolbar">
+        <h2 id="statistics-period">{{ period_name }}</h2>
+        <nav class="statistics-links" aria-label="Выбор периода">
+          {% if today_url %}<a class="quiet" href="{{ today_url }}">Текущий период</a>{% endif %}
+          {% if previous_url %}<a class="secondary statistics-arrow" href="{{ previous_url }}" aria-label="Предыдущий период">‹</a>{% endif %}
+          {% if next_url %}<a class="secondary statistics-arrow" href="{{ next_url }}" aria-label="Следующий период">›</a>{% endif %}
+        </nav>
+      </div>
+      <dl class="statistics-metrics">
+        <div><dt>Время фокуса</dt><dd>{{ total | duration_label }}{{ delta(duration_delta, true) }}</dd></div>
+        <div><dt>Сессии</dt><dd>{{ count }}{{ delta(count_delta) }}</dd></div>
+        <div><dt>{{ 'В среднем за сессию' if period == 'day' else 'В среднем за день' }}</dt><dd>{{ ((total // count if count else 0) if period == 'day' else daily_average) | duration_label }}</dd></div>
+      </dl>
+      <p class="muted statistics-note">Изменение к периоду {{ previous_name }}. Учтены завершённые личные сессии по дате окончания ({{ timezone }}).</p>
+    </section>
+
+    <div class="statistics-grid">
+      <section class="statistics-panel statistics-trend" aria-labelledby="statistics-trend">
+        <h2 id="statistics-trend">Динамика фокуса</h2>
+        {% if count %}
+          <p class="muted statistics-note">{{ 'По часу завершения сессии' if period == 'day' else 'По дню завершения сессии' }}</p>
+          <div class="statistics-chart" aria-hidden="true">
+            <div class="statistics-axis"><span>{{ chart_max | duration_label }}</span><span>{{ (chart_max // 2) | duration_label }}</span><span>0</span></div>
+            <div class="statistics-plot">
+              {% for label, tick, value in bars %}
+                <div class="statistics-column" title="{{ label }} · {{ value | duration_label }}">
+                  <progress value="{{ value }}" max="{{ chart_max }}"></progress>
+                  <span>{{ tick }}</span>
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+          <details class="statistics-values">
+            <summary>Значения на графике</summary>
+            <dl>{% for label, tick, value in bars %}<div><dt>{{ label }}</dt><dd>{{ value | duration_label }}</dd></div>{% endfor %}</dl>
+          </details>
+        {% else %}
+          <p class="statistics-empty">За этот период нет завершённых сессий.</p>
+        {% endif %}
+      </section>
+
+      <section class="statistics-panel" aria-labelledby="statistics-tasks">
+        <h2 id="statistics-tasks">Распределение по задачам</h2>
+        {% if tasks %}
+          <ul class="statistics-tasks">
+            {% for slug, duration in tasks %}
+              {% set target = targets.get(slug) %}
+              {% set share = (100 * duration / total) if total else 0 %}
+              <li>
+                <span class="statistics-task-label">{% if target %}<a href="{{ target.url }}">{{ target.name }}</a>{% else %}{{ slug }}{% endif %}</span>
+                <span class="statistics-task-value">{{ duration | duration_label }} <span class="muted">· {{ share | round(1) | string | replace('.', ',') }}%</span></span>
+                <progress value="{{ duration }}" max="{{ total or 1 }}" aria-label="Доля времени {{ target.name if target else slug }}"></progress>
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="statistics-empty">Здесь появятся задачи с завершёнными сессиями.</p>
+        {% endif %}
+      </section>
+    </div>
+
+    <section class="statistics-panel statistics-journal" aria-labelledby="statistics-journal">
+      <h2 id="statistics-journal">Журнал фокуса</h2>
+      {% for day, entries in journal %}
+        <details class="statistics-day"{% if loop.first %} open{% endif %}>
+          <summary><time datetime="{{ day.isoformat() }}">{{ day | day_label }}</time></summary>
+          {{ journal_rows(entries) }}
+        </details>
+      {% else %}
+        <p class="statistics-empty">За этот период записей нет.</p>
+      {% endfor %}
+    </section>
+  </div>
+{% endblock %}

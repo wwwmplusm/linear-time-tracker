@@ -1,4 +1,4 @@
 {% from "timers.html" import timer_board with context %}
-<div id="tracker-state" data-revision="{{ revision }}" data-now="{{ now }}" data-target="{{ selection.url }}" data-state-url="/linear/state{{ selection.query }}">
-  {{ timer_board("/linear", selection.query) }}
+<div id="tracker-state" data-revision="{{ revision }}" data-now="{{ now }}" data-target="{{ '/dashboard' if dashboard else selection.url }}" data-state-url="{{ '/dashboard/state' if dashboard else '/linear/state' ~ selection.query }}">
+  {{ timer_board("/linear", "?dashboard=1" if dashboard else selection.query) }}
 </div>

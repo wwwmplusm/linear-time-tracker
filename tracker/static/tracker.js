@@ -23,7 +23,9 @@ function updateClocks() {
   const now = serverNow + performance.now() - syncedAt;
   for (const duration of state.querySelectorAll("[data-start]")) {
     const total = Number(duration.dataset.worked) + Math.max(0, now - Number(duration.dataset.start));
-    const seconds = Math.floor(total / 1000);
+    const limit = Number(duration.dataset.limit);
+    const seconds = limit ? Math.max(0, Math.ceil((limit - total) / 1000)) : Math.floor(total / 1000);
+    if (limit && total >= limit) refresh();
     const parts = [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60];
     duration.textContent = parts.map(part => String(part).padStart(2, "0")).join(":");
   }
@@ -31,9 +33,9 @@ function updateClocks() {
 
 function updateTimerStatus() {
   const active = new Map(Array.from(state.querySelectorAll("[data-active-target]"), row =>
-    [row.dataset.activeTarget, row.hasAttribute("data-paused")],
+    [row.dataset.activeTarget, row],
   ));
-  const paused = [...active.values()].filter(Boolean).length;
+  const paused = [...active.values()].filter(row => row.hasAttribute("data-paused")).length;
   const statusLink = indicator.parentElement;
   statusLink.toggleAttribute("data-idle", !active.size);
   if (active.size) statusLink.setAttribute("href", "#active");
@@ -43,7 +45,9 @@ function updateTimerStatus() {
     const form = actions.querySelector("form");
     const link = actions.querySelector("a");
     const running = active.has(actions.dataset.linearTarget);
-    link.querySelector("[data-timer-state]").textContent = active.get(actions.dataset.linearTarget) ? "На паузе" : "Таймер идёт";
+    const row = active.get(actions.dataset.linearTarget);
+    link.querySelector("[data-timer-state]").textContent = row?.hasAttribute("data-overtime") ? "Сверх таймера"
+      : row?.hasAttribute("data-paused") ? "На паузе" : "Таймер идёт";
     if (form.hidden === running) continue;
     const wasFocused = actions.contains(document.activeElement);
     form.hidden = running;
@@ -105,3 +109,17 @@ window.addEventListener("focus", refresh);
 document.addEventListener("visibilitychange", refresh);
 window.setInterval(refresh, 5000);
 window.setInterval(updateClocks, 1000);
+
+document.addEventListener("click", event => {
+  const trigger = event.target.closest("[data-pomo]");
+  if (!trigger) return;
+  const dialog = document.getElementById("pomo-dialog");
+  const form = dialog.querySelector("[data-pomo-form]");
+  form.action = trigger.form.action;
+  form.querySelector("[data-pomo-fields]").replaceChildren(
+    ...Array.from(trigger.form.querySelectorAll('input[type="hidden"]'), input => input.cloneNode(true))
+  );
+  dialog.querySelector("[data-pomo-target]").textContent = trigger.dataset.pomo;
+  dialog.showModal();
+  form.elements.pomo_minutes.select();
+});

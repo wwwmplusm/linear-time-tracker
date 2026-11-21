@@ -1,23 +1,38 @@
 {% extends "base.html" %}
 {% from "source-link.html" import source_link %}
+{% from "timers.html" import pomo_button %}
 {% block head %}<script src="{{ asset('tracker.js') }}" defer></script><script src="{{ asset('catalog.js') }}" defer></script>{% endblock %}
 
-{% macro start_timer(kind, id, name, label="Запустить") %}
+{% macro timer_actions(kind, id, name, label="Запустить") %}
   {% set slug = "linear-" ~ id %}
   {% set running = active | selectattr("target", "eq", slug) | first | default(none) %}
-  <div class="linear-row-actions" data-linear-target="{{ slug }}">
-    <form method="post" action="/linear/targets/start{{ selection.query }}"{% if running %} hidden{% endif %}>
+  <div class="catalog-timer-actions">
+    <div class="linear-row-actions" data-linear-target="{{ slug }}">
+      <form method="post" action="/linear/targets/start{{ selection.query }}"{% if running %} hidden{% endif %}>
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="kind" value="{{ kind }}">
+        <input type="hidden" name="reference" value="{{ id }}">
+        <input type="hidden" name="key" value="{{ start_key }}">
+        <button class="secondary" type="submit" aria-label="Запустить таймер для «{{ name }}»">
+          <span class="icon icon-play" aria-hidden="true"></span>{{ label }}
+        </button>
+        {{ pomo_button(name) }}
+      </form>
+      <a class="running-label" href="/t/{{ slug }}" aria-label="Открыть активный таймер для «{{ name }}»"{% if not running %} hidden{% endif %}>
+        <span class="status-dot" aria-hidden="true"></span><span data-timer-state>{{ "Сверх таймера" if running and running.overtime_pending else "На паузе" if running and running.paused_ms is not none else "Таймер идёт" }}</span>
+      </a>
+    </div>
+    {% if id in added %}
+    <a class="quiet" href="{{ added[id] }}?manual=1#personal-time" aria-label="Внести время для «{{ name }}»">Задним числом</a>
+    {% else %}
+    <form method="post" action="/linear/targets/start{{ selection.query }}">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="kind" value="{{ kind }}">
       <input type="hidden" name="reference" value="{{ id }}">
       <input type="hidden" name="key" value="{{ start_key }}">
-      <button class="secondary" type="submit" aria-label="Запустить таймер для «{{ name }}»">
-        <span class="icon icon-play" aria-hidden="true"></span>{{ label }}
-      </button>
+      <button class="quiet" name="manual" value="true" type="submit" aria-label="Внести время для «{{ name }}»">Задним числом</button>
     </form>
-    <a class="running-label" href="/t/{{ slug }}" aria-label="Открыть активный таймер для «{{ name }}»"{% if not running %} hidden{% endif %}>
-      <span class="status-dot" aria-hidden="true"></span><span data-timer-state>{{ "На паузе" if running and running.paused_ms is not none else "Таймер идёт" }}</span>
-    </a>
+    {% endif %}
   </div>
 {% endmacro %}
 
@@ -38,7 +53,7 @@
       <div class="source-title"><h1>{{ results.project if results and selection.project else results.team if results and selection.team else "Команды Linear" }}</h1>
       {% if results %}{{ source_link(results.url, results.project if selection.project and selection.project != "none" else results.team or "рабочее пространство") }}{% endif %}</div>
       {% if results and selection.project and selection.project != "none" %}
-      {{ start_timer("project", selection.project, results.project, "Таймер проекта") }}
+      {{ timer_actions("project", selection.project, results.project, "Таймер проекта") }}
       {% endif %}
     </div>
     {% if not selection.team %}
@@ -86,7 +101,7 @@
           {% else %}<p>{{ item.name }}</p>{% endif %}
           <p class="muted">{{ source_link(item.url, item.name, item.identifier) }}</p>
         </div>
-        {{ start_timer("issue", item.id, item.name) }}
+        {{ timer_actions("issue", item.id, item.name) }}
       </li>
       {% else %}
       <li class="linear-choice">

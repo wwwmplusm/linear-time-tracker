@@ -49,6 +49,8 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
     catalog_queries = []
     projects = {}
     attachments = {}
+    completed_issues = set()
+    completion_failures = [True]
 
     def result_page(nodes, *, next_cursor=None, previous_cursor=None):
         return {
@@ -77,6 +79,19 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
             assert headers["Authorization"] == "Bearer initial-access"
             return {"data": {"viewer": {"name": "Владелец"}}}
         assert headers["Authorization"] == "Bearer next-access"
+        if "TrackerCompletionStates" in query:
+            assert variables == {"id": ISSUE}
+            state = {"name": "Done", "type": "completed"} if ISSUE in completed_issues else {"name": "Todo", "type": "unstarted"}
+            return {"data": {"issue": {"state": state, "team": {"states": {"nodes": [
+                {"id": "other", "name": "Released", "position": 0}, {"id": "done", "name": "Done", "position": 1},
+            ]}}}}}
+        if "TrackerCompleteIssue" in query:
+            assert variables == {"id": ISSUE, "state": "done"} and ISSUE not in completed_issues
+            if completion_failures:
+                completion_failures.pop()
+                return {"errors": [{"message": "Linear unavailable"}]}
+            completed_issues.add(ISSUE)
+            return {"data": {"issueUpdate": {"success": True, "issue": {"state": {"type": "completed", "name": "Done"}}}}}
         if "TrackerIssueSearch" in query:
             assert variables == {"term": "DEV-2"}
             return {"data": {"results": result_page([{
@@ -144,6 +159,7 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
     monkeypatch.setattr(linear, "_post", simulated_linear)
     app = create_app()
     with TestClient(app, base_url=BASE_URL) as browser:
+        assert browser.get("/linear/focus/destinations").status_code == 401
         login = browser.get("/")
         assert login.url.path == "/linear" and 'action="/linear/login"' in login.text
         home = browser.post("/linear/login", data={"credential": PASSWORD, "nonce": field(login, "nonce")})
@@ -184,6 +200,11 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
         assert 'href="https://linear.app/demo/project/dev"' in workspace
         assert "Первая задача" in workspace and "Без проекта" not in workspace
         assert "Без проекта" in sidebar and "Разработка" in sidebar
+        destinations = browser.get("/linear/focus/destinations").json()
+        assert destinations["items"][0]["id"] == TEAM
+        destinations = browser.get("/linear/focus/destinations", params={"team": TEAM}).json()
+        assert destinations["items"][0]["url"] == "https://linear.app/demo/project/dev"
+        assert destinations["teamUrl"] == "https://linear.app/demo/team/DEV/all"
         calls = len(catalog_queries)
         browser.get(project_page)
         assert len(catalog_queries) == calls
@@ -211,8 +232,21 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
             assert repeated.text.count(f'data-active-target="linear-{entity}"') == 1
             interval = re.search(rf'data-active-target="linear-{entity}".*?/linear/stop/(\d+)', repeated.text, re.S)[1]
             stop_url = project_page.replace("/linear?", f"/linear/stop/{interval}?")
+            complete_url = f"/linear/history/{interval}/complete"
+            assert browser.post(complete_url, data={"csrf": csrf}).status_code == 409
             stopped = browser.post(stop_url, data={"csrf": csrf})
-            assert stopped.url.query == found.url.query
+            assert stopped.url.params.get("team") == TEAM and stopped.url.params.get("project") == PROJECT
+            assert not completed_issues
+            if kind == "issue":
+                assert stopped.url.params["finished"] == interval and "Завершить задачу в Linear" in stopped.text
+                assert browser.post(complete_url, data={"csrf": "invalid"}).status_code == 403
+                assert browser.post(complete_url, data={"csrf": csrf}).status_code == 502
+                assert f'data-active-target="linear-{entity}"' not in browser.get(project_page).text
+                for _ in range(2):
+                    assert browser.post(complete_url, data={"csrf": csrf}).json() == {"state": "Done"}
+            else:
+                assert "finished" not in stopped.url.params
+                assert browser.post(complete_url, data={"csrf": csrf}).status_code == 409
             assert f'data-active-target="linear-{entity}"' not in stopped.text
             assert f'data-active-target="linear-{entity}"' not in browser.post(start_url, data=form).text
             assert name in browser.get(f"/t/linear-{entity}").text.split('id="personal-journal"')[1]
@@ -227,11 +261,45 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
         assert browser.get(f"/t/linear-{UNASSIGNED}").status_code == 404
         unassigned = browser.get(f"/linear?team={TEAM}&project=none")
         assert "Задача без проекта" in unassigned.text and "Первая задача" not in unassigned.text.split("<details")[0]
+        manual_page = browser.post(
+            f"/linear/targets/start?team={TEAM}&project=none",
+            data={"kind": "issue", "reference": UNASSIGNED, "csrf": csrf, "key": field(unassigned, "key"), "manual": "true"},
+        )
+        assert manual_page.url.path == f"/t/linear-{UNASSIGNED}"
+        assert '<details class="manual" id="personal-time" open>' in manual_page.text
+        assert f'data-active-target="linear-{UNASSIGNED}"' not in manual_page.text
+        manual_form = manual_page.text.split('id="personal-time" open>', 1)[1].split("</form>", 1)[0]
+        manual_key = re.search(r'name="key" value="([^"]+)"', manual_form)[1]
+        manual_url = f"/t/linear-{UNASSIGNED}/personal-time"
+        entry = {"csrf": csrf, "key": manual_key, "started": "2020-02-01T12:00", "ended": "2020-02-01T13:15"}
+        assert browser.post(manual_url, data={**entry, "csrf": "invalid"}).status_code == 403
+        for invalid_end, message in [
+            (entry["started"], "Окончание должно быть позже начала."),
+            ("2099-01-01T12:00", "Окончание не может быть в будущем."),
+        ]:
+            invalid = browser.post(manual_url, data={**entry, "ended": invalid_end})
+            assert invalid.status_code == 422 and message in invalid.text
+            assert f'value="{invalid_end}"' in invalid.text
+
+        for _ in range(2):
+            saved = browser.post(manual_url, data=entry)
+            journal = saved.text.split('id="personal-journal"', 1)[1].split("</section>", 1)[0]
+            assert journal.count("01:15:00") == 1
+            assert "2020-02-01T09:00:00.000+00:00" in journal
+        report = browser.get("/statistics?period=day&on=2020-02-01")
+        assert "Задача без проекта" in report.text and "1 ч 15 мин" in report.text
+
         unassigned_start = browser.post(
             f"/linear/targets/start?team={TEAM}&project=none",
             data={"kind": "issue", "reference": UNASSIGNED, "csrf": csrf, "key": field(unassigned, "key")},
         )
         assert f'data-active-target="linear-{UNASSIGNED}"' in unassigned_start.text
+
+        dashboard = browser.get("/dashboard")
+        assert '<h1>Дашборд</h1>' in dashboard.text and "Добавить задачу в фокус" in dashboard.text
+        assert f'data-active-target="linear-{UNASSIGNED}"' in dashboard.text
+        rev_dashboard = re.search(r'data-revision="([^"]+)"', dashboard.text)[1]
+        assert browser.get("/dashboard/state", headers={"X-Timer-Revision": rev_dashboard}).status_code == 204
 
         found = browser.get("/linear/focus/search", params={"q": "DEV-2"})
         assert [item["id"] for item in found.json()] == [UNASSIGNED]
@@ -240,6 +308,13 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
         for _ in range(2):
             assert browser.post("/linear/focus", data=focus_form).json() == {"url": f"/t/linear-{ISSUE}"}
         focus_page = browser.get("/linear/state", headers={"X-Timer-Revision": rev})
+        updated_dashboard = browser.get("/dashboard/state", headers={"X-Timer-Revision": rev_dashboard})
+        assert updated_dashboard.status_code == 200
+        assert f'action="/t/linear-{ISSUE}/start"' in updated_dashboard.text
+        stop_action = re.search(r'action="(/linear/stop/\d+\?dashboard=1)"', updated_dashboard.text)[1]
+        stopped = browser.post(stop_action, data={"csrf": csrf})
+        assert stopped.url.path == "/dashboard"
+        assert f'data-active-target="linear-{UNASSIGNED}"' not in stopped.text
         assert focus_page.text.count(f'action="/linear/focus/{ISSUE}/remove"') == 1
         assert f'data-active-target="linear-{ISSUE}"' not in focus_page.text
         assert browser.post(f"/linear/focus/{ISSUE}/remove", data={"csrf": csrf}).status_code == 204

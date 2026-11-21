@@ -3,7 +3,7 @@ import hmac
 import re
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from functools import lru_cache
 from pathlib import Path
 from secrets import token_urlsafe
@@ -21,6 +21,10 @@ from starlette.concurrency import run_in_threadpool
 from tracker.config import Settings, Target
 from tracker.db import Database, elapsed_ms, now_ms, running_since
 from tracker.linear import LinearBrowse, LinearError, LinearIntegration, LinearSettings, tracker_target
+from tracker.statistics import (
+    DAY, FIRST_DATE, PERIODS, Period, day_label, duration_label, midnight_ms,
+    period_bounds, period_label, report_data, statistics_url,
+)
 
 
 ROOT = Path(__file__).parent
@@ -28,12 +32,15 @@ SESSION_AGE = 30 * 24 * 60 * 60
 SESSION_COOKIE = "tracker_session"
 LOGIN_COOKIE = "tracker_login"
 REQUEST_KEY = re.compile(r"[A-Za-z0-9_-]{32}")
-LOCAL_DATETIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2})?")
+LOCAL_DATETIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,3})?)?")
 Csrf = Annotated[str, Form(max_length=64)]
 Nonce = Annotated[str, Form(min_length=32, max_length=32)]
 IntervalId = Annotated[int, PathParam(ge=1, le=2**63 - 1)]
 TimerVersion = Annotated[int, Form(ge=0, le=2**63 - 1)]
-TimerAction = Literal["pause", "resume"]
+TimerAction = Literal["pause", "resume", "extend"]
+OvertimeChoice = Literal["accept", "discard"]
+PomoMinutes = Annotated[int | None, Form(ge=1, le=1440)]
+HistoryKind = Literal["personal", "agents"]
 
 
 def linear_selection(
@@ -72,10 +79,10 @@ def parse_local(value: str, zone: ZoneInfo) -> int:
         raise ValueError("Проверьте дату и время.") from error
     if len(candidates) != 1:
         raise ValueError("Выберите однозначное время вне перевода часов в этом часовом поясе.")
-    return int(candidates.pop().timestamp()) * 1000
+    return round(candidates.pop().timestamp() * 1000)
 
 
-def agent_times(started: str, ended: str, zone: ZoneInfo) -> tuple[int, int]:
+def interval_times(started: str, ended: str, zone: ZoneInfo) -> tuple[int, int]:
     start_ms = parse_local(started, zone)
     end_ms = parse_local(ended, zone)
     if end_ms <= start_ms:
@@ -112,6 +119,8 @@ def create_app() -> FastAPI:
         local_time=lambda ms: utc_datetime(ms).astimezone(settings.timezone),
         elapsed_ms=elapsed_ms,
         running_since=running_since,
+        duration_label=duration_label,
+        day_label=day_label,
     )
 
     @app.middleware("http")
@@ -155,8 +164,10 @@ def create_app() -> FastAPI:
     def set_timer_playback(action: TimerAction, interval_id: int, version: int) -> None:
         if action == "pause":
             db.pause(interval_id, version)
-        else:
+        elif action == "resume":
             db.resume(interval_id, version)
+        else:
+            db.extend(interval_id, version)
 
     def restart_timer(interval_id: int, key: str) -> None:
         if not REQUEST_KEY.fullmatch(key):
@@ -176,10 +187,21 @@ def create_app() -> FastAPI:
 
     def all_targets(rows=None):
         imported = (tracker_target(row) for row in (linear_targets() if rows is None else rows))
-        return {**settings.targets, **{target.slug: target for target in imported}}
+        with db.transaction() as conn:
+            ticktick = conn.execute("SELECT slug, name FROM ticktick_targets").fetchall()
+        return {
+            **settings.targets,
+            **{target.slug: target for target in imported},
+            **{row["slug"]: Target(row["slug"], row["name"], "issue") for row in ticktick},
+        }
 
     def get_target(slug: str) -> Target:
         target = settings.targets.get(slug)
+        if target is None and slug.startswith("ticktick-"):
+            with db.transaction() as conn:
+                row = conn.execute("SELECT name FROM ticktick_targets WHERE slug = ?", (slug,)).fetchone()
+            if row:
+                target = Target(slug, row["name"], "issue")
         if target is None and slug.startswith("linear-"):
             with db.transaction() as conn:
                 row = conn.execute("SELECT * FROM linear_targets WHERE id = ?", (slug[7:],)).fetchone()
@@ -194,17 +216,16 @@ def create_app() -> FastAPI:
             name, token, max_age=age, httponly=True, secure=settings.secure_cookie, samesite=same_site
         )
 
-    def render_login(
-        request: Request, target: Target | None = None, *,
-        selection: LinearBrowse = LinearBrowse(), error: str | None = None,
-    ):
+    def render_login(request: Request, destination: str, *, error: str | None = None):
+        path, separator, query = destination.partition("?")
+        login_url = f"{path}/login{separator}{query}"
         nonce = token_urlsafe(24)
         response = templates.TemplateResponse(
             request,
             "login.html",
             {
                 "page_title": "Вход",
-                "login_url": f"{target.url}/login" if target else f"/linear/login{selection.query}",
+                "login_url": login_url,
                 "nonce": nonce,
                 "error": error,
             },
@@ -212,6 +233,19 @@ def create_app() -> FastAPI:
         )
         set_cookie(response, LOGIN_COOKIE, nonce, 600, "strict")
         return response
+
+    def after_stop(destination: str, interval_id: int):
+        if linear and db.finished_issue(interval_id):
+            separator = "&" if "?" in destination else "?"
+            destination += f"{separator}finished={interval_id}"
+        return RedirectResponse(destination, status_code=303)
+
+    def completion_prompt(request: Request):
+        value = request.query_params.get("finished", "")
+        if not linear or not re.fullmatch(r"[1-9][0-9]{0,18}", value) or int(value) >= 2**63:
+            return None
+        issue = db.finished_issue(int(value))
+        return {"interval": value, "name": issue["name"]} if issue else None
 
     def render_page(
         request: Request,
@@ -221,19 +255,22 @@ def create_app() -> FastAPI:
         partial: bool = False,
         error: str | None = None,
         form: dict | None = None,
+        manual_error: str | None = None,
+        manual_form: dict | None = None,
     ):
         active, personal, agents = db.snapshot()
         focus = db.focus_tasks() if linear else ()
         revision = ".".join((
             timer_revision(active),
-            str(tuple(row["id"] for row in personal)),
-            str(tuple(row["id"] for row in agents)),
+            timer_revision(personal),
+            str(tuple((row["id"], row["started_ms"], row["ended_ms"]) for row in agents)),
             focus_revision(focus),
         ))
         if partial and request.headers.get("X-Timer-Revision") == revision:
             return Response(status_code=204, headers={"X-Tracker-Now": str(now_ms())})
         context = {
             "target": target,
+            "completion_prompt": None if partial else completion_prompt(request),
             "targets": all_targets(),
             "linear_enabled": linear is not None,
             "journal_url": target.url,
@@ -249,39 +286,94 @@ def create_app() -> FastAPI:
             "revision": revision,
             "error": error,
             "form": form or {"key": token_urlsafe(24), "started": "", "ended": ""},
+            "manual_error": manual_error,
+            "manual_form": manual_form or {"key": token_urlsafe(24), "started": "", "ended": ""},
+            "manual_open": manual_error or request.query_params.get("manual") == "1",
         }
         return templates.TemplateResponse(
             request, "state.html" if partial else "target.html", context,
-            status_code=422 if error else 200,
+            status_code=422 if error or manual_error else 200,
         )
 
     @app.get("/")
     def index():
         return RedirectResponse(home_url, status_code=303)
 
+    @app.get("/healthz", status_code=204, response_class=Response)
+    def health():
+        with db.transaction() as conn:
+            conn.execute("SELECT 1").fetchone()
+        return Response(status_code=204)
+
+    def statistics_selection(period: Period = "week", on: date | None = None):
+        today = datetime.now(settings.timezone).date()
+        anchor = on or today
+        if not FIRST_DATE <= anchor <= today:
+            raise HTTPException(422, "Дата вне доступного диапазона.")
+        return period, anchor, today
+
+    @app.get("/statistics", response_class=HTMLResponse)
+    def statistics(request: Request, selection=Depends(statistics_selection)):
+        period, anchor, today = selection
+        try:
+            token = require_session(request)
+        except HTTPException:
+            return render_login(request, statistics_url(period, anchor))
+
+        start, end = period_bounds(period, anchor)
+        previous_start, _ = period_bounds(period, start - DAY)
+        rows = db.completed_sessions(
+            midnight_ms(previous_start, settings.timezone), midnight_ms(end, settings.timezone)
+        )
+        back_url = "/dashboard" if linear else default_target.url
+        return templates.TemplateResponse(request, "statistics.html", {
+            **report_data(period, start, end, today, rows, settings.timezone),
+            "page_title": "Статистика",
+            "is_statistics": True,
+            "period": period,
+            "period_name": period_label(start, end),
+            "previous_name": period_label(previous_start, start),
+            "period_links": [(key, label, statistics_url(key, anchor)) for key, label in PERIODS.items()],
+            "previous_url": statistics_url(period, start - DAY) if start - DAY >= FIRST_DATE else None,
+            "next_url": statistics_url(period, end) if end <= today else None,
+            "today_url": statistics_url(period, today) if end <= today else None,
+            "linear_enabled": linear is not None,
+            "targets": all_targets(),
+            "journal_url": default_target.url,
+            "active_url": back_url + "#active",
+            "timezone": settings.timezone.key,
+            "csrf": csrf_token(token),
+            "active": db.active_timers(),
+        })
+
+    @app.post("/statistics/login")
+    def statistics_login(
+        request: Request, credential: Annotated[str, Form(max_length=4096)], nonce: Nonce,
+        selection=Depends(statistics_selection),
+    ):
+        period, anchor, _ = selection
+        return sign_in(request, credential, nonce, statistics_url(period, anchor))
+
     @app.get("/t/{slug}", response_class=HTMLResponse)
     def page(request: Request, target: Target = Depends(get_target)):
         try:
             token = require_session(request)
         except HTTPException:
-            return render_login(request, target)
+            return render_login(request, target.url)
         return render_page(request, target, token)
 
-    def sign_in(
-        request: Request, credential: str, nonce: str, target: Target | None = None, *,
-        selection: LinearBrowse = LinearBrowse(),
-    ):
+    def sign_in(request: Request, credential: str, nonce: str, destination: str):
         cookie = request.cookies.get(LOGIN_COOKIE, "")
         if not REQUEST_KEY.fullmatch(nonce) or not hmac.compare_digest(nonce.encode(), cookie.encode()):
             raise HTTPException(403)
         if not hmac.compare_digest(hashlib.sha256(credential.encode()).digest(), password):
-            return render_login(request, target, selection=selection, error="Неверный пароль.")
+            return render_login(request, destination, error="Неверный пароль.")
         old_token = request.cookies.get(SESSION_COOKIE, "")
         if REQUEST_KEY.fullmatch(old_token):
             db.remove_session(session_digest(old_token))
         token = token_urlsafe(24)
         db.add_session(session_digest(token), now_ms() + SESSION_AGE * 1000)
-        response = RedirectResponse(target.url if target else selection.url, status_code=303)
+        response = RedirectResponse(destination, status_code=303)
         set_cookie(response, SESSION_COOKIE, token, SESSION_AGE, "lax")
         response.delete_cookie(LOGIN_COOKIE, secure=settings.secure_cookie, httponly=True, samesite="strict")
         return response
@@ -293,7 +385,7 @@ def create_app() -> FastAPI:
         nonce: Nonce,
         target: Target = Depends(get_target),
     ):
-        return sign_in(request, credential, nonce, target)
+        return sign_in(request, credential, nonce, target.url)
 
     @app.post("/logout")
     def logout(token: str = Depends(require_post)):
@@ -307,16 +399,16 @@ def create_app() -> FastAPI:
         return render_page(request, target, token, partial=True)
 
     @app.post("/t/{slug}/start")
-    def start(key: Nonce, target: Target = Depends(get_target), token: str = Depends(require_post)):
+    def start(key: Nonce, pomo_minutes: PomoMinutes = None, target: Target = Depends(get_target), token: str = Depends(require_post)):
         if not REQUEST_KEY.fullmatch(key):
             raise HTTPException(422)
-        db.start(target, key)
+        db.start(target, key, pomo_minutes=pomo_minutes)
         return RedirectResponse(target.url, status_code=303)
 
     @app.post("/t/{slug}/stop/{interval_id}")
     def stop(interval_id: IntervalId, target: Target = Depends(get_target), token: str = Depends(require_post)):
         db.stop(interval_id)
-        return RedirectResponse(target.url, status_code=303)
+        return after_stop(target.url, interval_id)
 
     @app.post("/t/{slug}/timers/{action}/{interval_id}")
     def timer_playback(
@@ -326,12 +418,108 @@ def create_app() -> FastAPI:
         set_timer_playback(action, interval_id, version)
         return RedirectResponse(target.url, status_code=303)
 
+    @app.post("/t/{slug}/overtime/{choice}/{interval_id}")
+    def overtime(choice: OvertimeChoice, interval_id: IntervalId, target: Target = Depends(get_target),
+                 token: str = Depends(require_post)):
+        db.finish_overtime(interval_id, accept=choice == "accept")
+        return after_stop(target.url, interval_id)
+
     @app.post("/t/{slug}/history/{interval_id}/restart")
     def restart_from_history(
         interval_id: IntervalId, key: Nonce, target: Target = Depends(get_target), token: str = Depends(require_post),
     ):
         restart_timer(interval_id, key)
         return RedirectResponse(target.url, status_code=303)
+
+    def editable_entry(kind: HistoryKind, interval_id: int):
+        row = db.history_entry(kind, interval_id)
+        if row is None:
+            raise HTTPException(404, "Запись не найдена.")
+        if kind == "personal" and row["overtime_pending"]:
+            raise HTTPException(409, "Сначала засчитайте или отбросьте дополнительное время.")
+        return row
+
+    def edit_destination(request, target, kind, ended_ms):
+        if kind == "personal" and request.query_params.get("report") == "1":
+            day = utc_datetime(ended_ms).astimezone(settings.timezone).date()
+            return statistics_url("day", day) + "#statistics-journal"
+        return target.url + "#" + kind
+
+    def render_editor(request, token, kind, row, started=None, ended=None, error=None, status=200):
+        targets = all_targets()
+        target = targets.get(row["target"], default_target)
+
+        def local_input(ms):
+            local = utc_datetime(ms).astimezone(settings.timezone)
+            return local.replace(tzinfo=None).isoformat(timespec="milliseconds")
+
+        return templates.TemplateResponse(request, "edit.html", {
+            "page_title": "Редактировать запись", "target": target, "targets": targets,
+            "entry_name": targets[row["target"]].name if row["target"] in targets else row["target"],
+            "journal_url": target.url, "active_url": target.url + "#active", "kind": kind,
+            "csrf": csrf_token(token), "active": db.active_timers(), "linear_enabled": linear is not None,
+            "timezone": settings.timezone.key, "row": row, "error": error,
+            "cancel_url": edit_destination(request, target, kind, row["ended_ms"]),
+            "started": local_input(row["started_ms"]) if started is None else started,
+            "ended": local_input(row["ended_ms"]) if ended is None else ended,
+        }, status_code=status)
+
+    @app.get("/history/{kind}/{interval_id}/edit", response_class=HTMLResponse)
+    def edit_page(request: Request, kind: HistoryKind, interval_id: IntervalId):
+        try:
+            token = require_session(request)
+        except HTTPException:
+            return render_login(request, request.url.path)
+        return render_editor(request, token, kind, editable_entry(kind, interval_id))
+
+    @app.post("/history/{kind}/{interval_id}/edit/login")
+    def edit_login(request: Request, kind: HistoryKind, interval_id: IntervalId,
+                   credential: Annotated[str, Form(max_length=4096)], nonce: Nonce):
+        return sign_in(request, credential, nonce, f"/history/{kind}/{interval_id}/edit")
+
+    @app.post("/history/{kind}/{interval_id}/edit")
+    def save_edit(request: Request, kind: HistoryKind, interval_id: IntervalId,
+                  original_start: Annotated[int, Form(ge=-(2**63), lt=2**63)],
+                  original_end: Annotated[int, Form(ge=-(2**63), lt=2**63)],
+                  started: Annotated[str, Form(max_length=23)], ended: Annotated[str, Form(max_length=23)],
+                  token: str = Depends(require_post)):
+        row = editable_entry(kind, interval_id)
+        conflict = "Запись изменилась в другой вкладке. Проверьте обновлённое время перед сохранением."
+        if (original_start, original_end) != (row["started_ms"], row["ended_ms"]):
+            return render_editor(request, token, kind, row, error=conflict, status=409)
+        try:
+            start, end = interval_times(started, ended, settings.timezone)
+            if kind == "personal" and end > now_ms():
+                raise ValueError("Окончание не может быть в будущем.")
+        except ValueError as error:
+            return render_editor(request, token, kind, row, started, ended, str(error), 422)
+        if not db.edit_entry(kind, interval_id, original_start, original_end, start, end):
+            return render_editor(request, token, kind, editable_entry(kind, interval_id), error=conflict, status=409)
+        target = all_targets().get(row["target"], default_target)
+        return RedirectResponse(edit_destination(request, target, kind, end), status_code=303)
+
+    @app.post("/t/{slug}/personal-time")
+    def record_personal_time(
+        request: Request,
+        key: Nonce,
+        started: Annotated[str, Form(max_length=19)],
+        ended: Annotated[str, Form(max_length=19)],
+        target: Target = Depends(get_target),
+        token: str = Depends(require_post),
+    ):
+        if not REQUEST_KEY.fullmatch(key):
+            raise HTTPException(422)
+        try:
+            start_ms, end_ms = interval_times(started, ended, settings.timezone)
+            if end_ms > now_ms():
+                raise ValueError("Окончание не может быть в будущем.")
+        except ValueError as error:
+            return render_page(
+                request, target, token, manual_error=str(error),
+                manual_form={"key": key, "started": started, "ended": ended},
+            )
+        db.record_personal_time(target.slug, key, start_ms, end_ms)
+        return RedirectResponse(target.url + "#personal", status_code=303)
 
     @app.post("/t/{slug}/agent-runs")
     def record_agent_run(
@@ -347,7 +535,7 @@ def create_app() -> FastAPI:
         if not REQUEST_KEY.fullmatch(key):
             raise HTTPException(422)
         try:
-            start_ms, end_ms = agent_times(started, ended, settings.timezone)
+            start_ms, end_ms = interval_times(started, ended, settings.timezone)
         except ValueError as error:
             return render_page(
                 request, target, token, error=str(error),
@@ -409,6 +597,7 @@ def create_app() -> FastAPI:
                     {
                         **entry(row), "worked": row["worked_ms"] or 0,
                         "runningSince": running_since(row), "version": row["version"],
+                        "pomoMs": row["pomo_ms"], "overtime": bool(row["overtime_pending"]),
                     }
                     for row in active
                 ],
@@ -416,6 +605,7 @@ def create_app() -> FastAPI:
                 "agents": [entry(row) for row in agents],
                 "now": now,
                 "timerControls": True,
+                "pomodoro": True,
                 "timezone": settings.timezone.key,
                 "csrf": csrf_token(token),
             }
@@ -438,7 +628,7 @@ def create_app() -> FastAPI:
         @app.post("/inline/start", status_code=204)
         def inline_start(
             url: Annotated[str, Form(max_length=900)], key: Nonce,
-            issue_id: Annotated[UUID | None, Form()] = None, token: str = Depends(require_post),
+            pomo_minutes: PomoMinutes = None, issue_id: Annotated[UUID | None, Form()] = None, token: str = Depends(require_post),
         ):
             if not REQUEST_KEY.fullmatch(key):
                 raise HTTPException(422)
@@ -452,17 +642,29 @@ def create_app() -> FastAPI:
                     )
                 except LinearError as error:
                     raise HTTPException(409 if error.kind == "membership" else 502, str(error)) from None
-            db.start(target, key, linear_reference=reference)
+            db.start(target, key, linear_reference=reference, pomo_minutes=pomo_minutes)
 
-        @app.post("/inline/stop/{interval_id}", status_code=204)
-        def inline_stop(interval_id: IntervalId, token: str = Depends(require_post)):
+        def inline_stop_result(request: Request, interval_id: int):
+            if request.headers.get("X-Tracker-Completion") == "1":
+                issue = db.finished_issue(interval_id)
+                return {"finishedIssue": issue["name"] if issue else None}
+            return Response(status_code=204)
+
+        @app.post("/inline/stop/{interval_id}")
+        def inline_stop(request: Request, interval_id: IntervalId, token: str = Depends(require_post)):
             db.stop(interval_id)
+            return inline_stop_result(request, interval_id)
 
         @app.post("/inline/timers/{action}/{interval_id}", status_code=204)
         def inline_playback(
             action: TimerAction, interval_id: IntervalId, version: TimerVersion, token: str = Depends(require_post),
         ):
             set_timer_playback(action, interval_id, version)
+
+        @app.post("/inline/overtime/{choice}/{interval_id}")
+        def inline_overtime(request: Request, choice: OvertimeChoice, interval_id: IntervalId, token: str = Depends(require_post)):
+            db.finish_overtime(interval_id, accept=choice == "accept")
+            return inline_stop_result(request, interval_id)
 
         @app.post("/inline/history/{interval_id}/restart", status_code=204)
         def inline_restart(interval_id: IntervalId, key: Nonce, token: str = Depends(require_post)):
@@ -480,7 +682,7 @@ def create_app() -> FastAPI:
             if target.kind != "issue":
                 raise HTTPException(404)
             try:
-                start_ms, end_ms = agent_times(started, ended, settings.timezone)
+                start_ms, end_ms = interval_times(started, ended, settings.timezone)
             except ValueError as error:
                 raise HTTPException(422, str(error)) from None
             db.register_linear_target(target, reference)
@@ -537,6 +739,7 @@ def create_app() -> FastAPI:
             context = {
                 **linear_timer_state(token, selection, db.active_timers(), focus, rows),
                 **(linear_navigation(selection, results) if results else {}),
+                "completion_prompt": completion_prompt(request),
                 "page_title": "Linear",
                 "linear_enabled": True,
                 "journal_url": default_target.url,
@@ -569,16 +772,32 @@ def create_app() -> FastAPI:
             try:
                 token = require_session(request)
             except HTTPException:
-                return render_login(request, selection=selection)
+                return render_login(request, selection.url)
             return linear_page(request, token, selection=selection, error=callback_errors.get(oauth))
+
+        @app.get("/dashboard", response_class=HTMLResponse)
+        def dashboard(request: Request):
+            try:
+                token = require_session(request)
+            except HTTPException:
+                return render_login(request, "/dashboard")
+            focus = db.focus_tasks()
+            context = linear_timer_state(token, LinearBrowse(), db.active_timers(), focus)
+            context.update(completion_prompt=completion_prompt(request), page_title="Дашборд", dashboard=True, journal_url=default_target.url)
+            return templates.TemplateResponse(request, "dashboard.html", context)
+
+        @app.post("/dashboard/login")
+        def dashboard_login(request: Request, credential: Annotated[str, Form(max_length=4096)], nonce: Nonce):
+            return sign_in(request, credential, nonce, "/dashboard")
 
         @app.post("/linear/login")
         def linear_login(
             request: Request, credential: Annotated[str, Form(max_length=4096)], nonce: Nonce,
             selection: LinearBrowse = Depends(linear_selection),
         ):
-            return sign_in(request, credential, nonce, selection=selection)
+            return sign_in(request, credential, nonce, selection.url)
 
+        @app.get("/dashboard/state", response_class=HTMLResponse)
         @app.get("/linear/state", response_class=HTMLResponse)
         def linear_state(
             request: Request, selection: LinearBrowse = Depends(linear_selection), token: str = Depends(require_session),
@@ -587,7 +806,32 @@ def create_app() -> FastAPI:
             focus = db.focus_tasks()
             if request.headers.get("X-Timer-Revision") == timer_revision(active) + "." + focus_revision(focus):
                 return Response(status_code=204, headers={"X-Tracker-Now": str(now_ms())})
-            return templates.TemplateResponse(request, "linear-state.html", linear_timer_state(token, selection, active, focus))
+            context = linear_timer_state(token, selection, active, focus)
+            context["dashboard"] = request.url.path == "/dashboard/state"
+            return templates.TemplateResponse(request, "linear-state.html", context)
+
+        @app.post("/linear/history/{interval_id}/complete")
+        def complete_tracked_issue(interval_id: IntervalId, token: str = Depends(require_post)):
+            issue = db.finished_issue(interval_id)
+            if not issue:
+                raise HTTPException(409, "Сначала завершите учёт времени по задаче Linear.")
+            try:
+                return {"state": linear.complete_issue(issue["id"])}
+            except LinearError as error:
+                raise HTTPException(502, str(error)) from None
+
+        @app.get("/linear/focus/destinations")
+        def focus_destinations(team: UUID | None = None, after: Annotated[str, Query(max_length=500)] = "",
+                               token: str = Depends(require_session)):
+            try:
+                result = linear.browse(LinearBrowse(team=str(team or ""), after=after))
+            except LinearError as error:
+                raise HTTPException(502, str(error)) from None
+            page = result["page"]
+            return {
+                "items": page["nodes"], "teamUrl": result["url"] if team else None,
+                "next": page["pageInfo"]["endCursor"] if page["pageInfo"]["hasNextPage"] else None,
+            }
 
         @app.get("/linear/focus/search")
         def focus_search(
@@ -668,6 +912,7 @@ def create_app() -> FastAPI:
             key: Nonce,
             selection: LinearBrowse = Depends(linear_selection),
             token: str = Depends(require_post),
+            manual: Annotated[bool, Form()] = False, pomo_minutes: PomoMinutes = None,
         ):
             if (
                 not REQUEST_KEY.fullmatch(key)
@@ -683,23 +928,33 @@ def create_app() -> FastAPI:
                 )
             except LinearError as error:
                 return linear_page(request, token, selection=selection, error=str(error))
-            db.start(target, key, linear_reference=resolved_reference)
+            if manual:
+                db.register_linear_target(target, resolved_reference)
+                return RedirectResponse(target.url + "?manual=1#personal-time", status_code=303)
+            db.start(target, key, linear_reference=resolved_reference, pomo_minutes=pomo_minutes)
             return RedirectResponse(selection.url, status_code=303)
 
         @app.post("/linear/stop/{interval_id}")
         def linear_stop(
-            interval_id: IntervalId, selection: LinearBrowse = Depends(linear_selection), token: str = Depends(require_post),
+            interval_id: IntervalId, dashboard: bool = False,
+            selection: LinearBrowse = Depends(linear_selection), token: str = Depends(require_post),
         ):
             db.stop(interval_id)
-            return RedirectResponse(selection.url, status_code=303)
+            return after_stop("/dashboard" if dashboard else selection.url, interval_id)
 
         @app.post("/linear/timers/{action}/{interval_id}")
         def linear_playback(
-            action: TimerAction, interval_id: IntervalId, version: TimerVersion,
+            action: TimerAction, interval_id: IntervalId, version: TimerVersion, dashboard: bool = False,
             selection: LinearBrowse = Depends(linear_selection), token: str = Depends(require_post),
         ):
             set_timer_playback(action, interval_id, version)
-            return RedirectResponse(selection.url, status_code=303)
+            return RedirectResponse("/dashboard" if dashboard else selection.url, status_code=303)
+
+        @app.post("/linear/overtime/{choice}/{interval_id}")
+        def linear_overtime(choice: OvertimeChoice, interval_id: IntervalId, dashboard: bool = False,
+                            selection: LinearBrowse = Depends(linear_selection), token: str = Depends(require_post)):
+            db.finish_overtime(interval_id, accept=choice == "accept")
+            return after_stop("/dashboard" if dashboard else selection.url, interval_id)
 
         @app.post("/linear/targets/{target_id}/link")
         def linear_publish_link(

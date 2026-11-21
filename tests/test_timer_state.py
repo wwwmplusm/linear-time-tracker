@@ -1,7 +1,10 @@
 import sqlite3
 from contextlib import closing
 
+import pytest
+
 from tracker import db
+from tracker.config import Target
 
 
 def test_legacy_intervals_survive_pause_and_history_restart(tmp_path, monkeypatch):
@@ -47,3 +50,50 @@ def test_legacy_intervals_survive_pause_and_history_restart(tmp_path, monkeypatc
     database.stop(new["id"])
     assert database.restart(2, "restart-key")
     assert not database.active_timers()
+
+@pytest.mark.parametrize("accept", [False, True])
+def test_pomodoro_completes_offline_and_settles_once(tmp_path, monkeypatch, accept):
+    path = tmp_path / "pomo.sqlite3"
+    database = db.Database(path)
+    database.initialize()
+    target = Target("task", "Task", "issue")
+    now = 1000
+    monkeypatch.setattr(db, "now_ms", lambda: now)
+    database.start(target, "first", pomo_minutes=60)
+    now += 300_000
+    database.pause(1, 0)
+    now += 7_200_000
+    assert not database.completed_sessions(0, now + 1)
+    database.resume(1, 1)
+    deadline = now + 3_300_000
+    now = deadline + 1_200_000
+    # Statistics is the first request after restart. No client delivered a stop.
+    database = db.Database(path)
+    row, = database.completed_sessions(0, now + 1)
+    assert (row["ended_ms"], row["worked_ms"]) == (deadline, 3_600_000)
+    database.stop(1)
+    database.extend(1, 2)
+    database.start(target, "stale", pomo_minutes=25)
+    pending, = database.active_timers()
+    assert pending["id"] == 1 and pending["overtime_pending"]
+    database.finish_overtime(1, accept=accept)
+    now += 50_000
+    database.finish_overtime(1, accept=not accept)
+    database.start(target, "first")
+    active, history, _ = database.snapshot()
+    assert not active and len(history) == 1
+    extra = 1_200_000 if accept else 0
+    assert (history[0]["ended_ms"], history[0]["worked_ms"]) == (deadline + extra, 3_600_000 + extra)
+
+
+def test_edit_preserves_pauses_and_rejects_stale_edits(tmp_path):
+    database = db.Database(tmp_path / "edit.sqlite3")
+    database.initialize()
+    with database.transaction(write=True) as conn:
+        conn.execute("INSERT INTO intervals (target, started_ms, ended_ms, worked_ms) VALUES ('a', 100, 600, 300)")
+    database.record_agent_run("a", "agent", 100, 600)
+    for kind in ("personal", "agents"):
+        assert database.edit_entry(kind, 1, 100, 600, 1000, 1800)
+        assert not database.edit_entry(kind, 1, 100, 600, 1500, 2400)
+        assert database.history_entry(kind, 1)["started_ms"] == 1000
+    assert database.history_entry("personal", 1)["worked_ms"] == 600

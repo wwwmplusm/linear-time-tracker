@@ -1,7 +1,9 @@
 import json
 import os
+import re
 import shutil
 import socket
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -74,6 +76,21 @@ def inline_server(monkeypatch, tmp_path, live_issue_rows):
 
         monkeypatch.setattr(LinearIntegration, "resolve_target", resolve)
         monkeypatch.setattr(LinearIntegration, "project_issues", issues)
+
+        def directory(self, selection):
+            assert not selection.project
+            team = {"id": "33333333-3333-4333-8333-333333333333", "name": "Команда теста", "url": "https://linear.app/demo/team/DEMO/all"}
+            project = {"id": project_id, "name": "Проект теста", "url": "https://linear.app/demo/project/test-project/overview"}
+            return {"url": team["url"], "page": {"nodes": [project if selection.team else team],
+                                                "pageInfo": {"hasNextPage": False}}}
+
+        monkeypatch.setattr(LinearIntegration, "browse", directory)
+        monkeypatch.setattr(LinearIntegration, "search_issues", lambda self, term: [])
+        def complete(self, target_id):
+            assert target_id == issue_id
+            return "Готово"
+
+        monkeypatch.setattr(LinearIntegration, "complete_issue", complete)
 
         config = uvicorn.Config(create_app(), log_level="warning", access_log=False)
         server = uvicorn.Server(config)
@@ -166,6 +183,10 @@ def test_track_directly_inside_linear(tmp_path, inline_server, stale_worker, liv
         tracker.get_by_role("button", name="Продолжить таймер «Тестовая задача»").click()
         expect(panel.locator("#active").get_by_role("button", name="Приостановить таймер «Тестовая задача»")).to_be_visible(timeout=7000)
         tracker.get_by_role("button", name="Остановить таймер «Тестовая задача»", exact=True).click()
+        saved = tracker.get_by_role("region", name="Завершение задачи Linear")
+        expect(saved).to_contain_text("Время сохранено · Тестовая задача")
+        saved.get_by_role("button", name="Завершить задачу в Linear").click()
+        expect(saved).to_contain_text("Готово")
         expect(panel.locator("#active .entry")).to_have_count(1, timeout=7500)
         panel.get_by_role("button", name="Запустить таймер задачи «Тестовая задача»").click()
         expect(panel.locator("#active .entry")).to_have_count(2)
@@ -174,6 +195,13 @@ def test_track_directly_inside_linear(tmp_path, inline_server, stale_worker, liv
         expect(panel.locator("#active .entry")).to_have_count(1)
         panel.locator("#quick").click()
         expect(panel.locator("#active .entry")).to_have_count(0)
+        tracker.goto(origin + "/dashboard")
+        tracker.get_by_role("button", name="Добавить задачу в фокус").click()
+        tracker.get_by_role("button", name="Перейти к проекту в Linear").click()
+        tracker.get_by_role("button", name="Команда теста").click()
+        tracker.route("https://linear.app/**", lambda route: route.fulfill(body="Project issues", content_type="text/html"))
+        tracker.get_by_role("link", name="Проект теста").click()
+        expect(tracker).to_have_url("https://linear.app" + LINEAR_PROJECT)
         second_browser.close()
 
         live_issue_rows.clear()
@@ -194,4 +222,33 @@ def test_track_directly_inside_linear(tmp_path, inline_server, stale_worker, liv
         panel.locator("#personal").get_by_role("button", name="Запустить снова «Тестовый проект»").click()
         expect(panel.locator("#active .entry")).to_have_count(1)
         expect(panel.locator("#active .entry")).to_contain_text("Тестовый проект")
+        panel.get_by_text("Помодоро", exact=True).click()
+        panel.get_by_label("Длительность, мин").fill("60")
+        panel.get_by_role("button", name="Начать помодоро").click()
+        expect(panel.locator("#quick")).to_contain_text("Помодоро")
+        with sqlite3.connect(tmp_path / "tracker.sqlite3") as conn:
+            conn.execute("UPDATE intervals SET started_ms = started_ms - 3900000 WHERE pomo_ms IS NOT NULL")
+        pending = panel.locator("#active .entry").filter(has_text="Тестовая задача")
+        expect(pending).to_contain_text("60 мин в журнале", timeout=7000)
+        pending.get_by_role("button", name="Отбросить «Тестовая задача»").click()
+        expect(panel.locator("#active .entry")).to_have_count(1)
+        focus_entry = panel.locator("#personal .entry").filter(has_text="01:00:00")
+        expect(focus_entry).to_have_count(1)
+        expect(focus_entry.get_by_role("link", name="Редактировать")).to_have_attribute(
+            "href", re.compile(r"/history/personal/\d+/edit$")
+        )
+        panel.get_by_role("button", name="Завершить задачу в Linear").click()
+        expect(panel.locator("#completion-message")).to_contain_text("Готово")
+
+        dashboard = profile.new_page()
+        dashboard.goto(origin + "/dashboard")
+        dashboard.get_by_role("button", name="Добавить задачу в фокус").click()
+        dialog = dashboard.get_by_role("dialog", name="Добавить задачу в фокус")
+        dialog.get_by_role("button", name="Перейти к проекту в Linear").click()
+        dashboard.get_by_role("button", name="Команда теста").click()
+        pages_before = len(profile.pages)
+        dashboard.get_by_role("link", name="Проект теста").click()
+        expect(issue_page).to_have_url("https://linear.app" + LINEAR_PROJECT)
+        expect(dashboard).to_have_url(origin + "/dashboard")
+        assert len(profile.pages) == pages_before
         profile.close()

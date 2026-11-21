@@ -27,11 +27,23 @@
           <a target="_blank" rel="noreferrer" id="setup-link">Войти в трекер</a>
         </div>
         <div id="sections" hidden>
+          <div id="completion" hidden>
+            <p id="completion-message" role="status"></p>
+            <button type="button" id="complete-issue">Завершить задачу в Linear</button>
+            <button type="button" id="dismiss-completion">Закрыть</button>
+          </div>
           <nav class="panel-nav" aria-label="Навигация">
             <button type="button" data-section="timer-overview">Таймеры</button>
             <button type="button" data-section="project-issues" hidden>Задачи</button>
             <button type="button" data-section="journal">Журнал</button>
           </nav>
+          <details id="pomo" hidden>
+            <summary>Помодоро</summary>
+            <form id="pomo-form" class="fields">
+              <label>Длительность, мин<input type="number" name="minutes" min="1" max="1440" value="25" required></label>
+              <button type="submit">Начать помодоро</button>
+            </form>
+          </details>
           <section id="timer-overview" aria-labelledby="timer-overview-title">
             <div class="timer-heading">
               <h2 id="timer-overview-title">Активные таймеры</h2>

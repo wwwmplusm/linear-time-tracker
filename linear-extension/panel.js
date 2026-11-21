@@ -48,23 +48,26 @@ function tick() {
   if (!state) return;
   const now = state.now + performance.now() - syncedAt;
   const running = state.active.find(row => row.target === state.target.slug);
-  const paused = running?.runningSince === null;
+  const paused = running?.runningSince === null && !running.overtime;
   const kind = state.target.kind === "project" ? "Проект" : "Задача";
   quick.toggleAttribute("data-running", Boolean(running));
   quick.toggleAttribute("data-paused", paused && timerControlsSupported);
   quickLabel.textContent = running
-    ? kind + " · " + duration(timerElapsed(running, now))
+    ? (running.overtime ? "Сверх таймера" : running.pomoMs ? "Помодоро" : kind) + " · " + duration(timerElapsed(running, now))
     : (state.target.kind === "project" ? "По проекту" : "По задаче");
-  const action = paused && timerControlsSupported ? "Продолжить" : running ? "Остановить" : "Запустить";
+  const action = running?.overtime ? "Открыть" : paused && timerControlsSupported ? "Продолжить" : running ? "Остановить" : "Запустить";
   quick.setAttribute("aria-label", action + " таймер «" + state.target.name + "»");
   for (const text of document.querySelectorAll("[data-started]")) {
-    text.textContent = duration(Number(text.dataset.worked) + Math.max(0, now - Number(text.dataset.started)));
+    const elapsed = Number(text.dataset.worked) + Math.max(0, now - Number(text.dataset.started));
+    text.textContent = duration(text.dataset.limit ? Number(text.dataset.limit) - elapsed + 999 : elapsed);
   }
 }
 
 function timerElapsed(row, now) {
+  if (row.overtime) return Math.max(0, now - row.ended);
   const since = row.runningSince ?? row.started;
-  return (row.worked ?? 0) + (row.runningSince === null ? 0 : Math.max(0, now - since));
+  const elapsed = (row.worked ?? 0) + (row.runningSince === null ? 0 : Math.max(0, now - since));
+  return row.pomoMs ? Math.max(0, row.pomoMs - elapsed + 999) : elapsed;
 }
 
 function showSection(id) {
@@ -126,11 +129,12 @@ function renderIssueRows() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "issue-action";
-    button.textContent = paused ? "Продолжить" : timer ? "Остановить" : "Запустить";
+    button.textContent = timer?.overtime ? "Сверх таймера" : paused ? "Продолжить" : timer ? "Остановить" : "Запустить";
     button.setAttribute("aria-label", button.textContent + " таймер задачи «" + issue.title + "»");
     button.addEventListener("click", event => {
       if (!event.isTrusted) return;
-      if (paused) change("resume", { interval: timer.id, version: timer.version });
+      if (timer?.overtime) showSection("timer-overview");
+      else if (paused) change("resume", { interval: timer.id, version: timer.version });
       else if (timer) change("stop", { interval: timer.id });
       else change("start-project-issue", { issueId: issue.id });
     });
@@ -212,7 +216,7 @@ function timerButton(className, label, row, handler) {
 
 function renderList(rows, id, timezone) {
   const open = id === "personal" ? new Set(state.active.map(row => row.target)) : new Set();
-  const serialized = JSON.stringify([rows, timezone, timerControlsSupported, [...open]]);
+  const serialized = JSON.stringify([rows, timezone, timerControlsSupported, [...open], state.pomodoro]);
   if (lists.get(id) === serialized) return;
   lists.set(id, serialized);
   const list = byId(id);
@@ -231,15 +235,15 @@ function renderList(rows, id, timezone) {
   for (const row of rows) {
     const entry = document.createElement("div");
     entry.className = "entry";
-    const paused = row.runningSince === null;
+    const paused = row.runningSince === null && !row.overtime;
     entry.toggleAttribute("data-paused", paused);
     const info = document.createElement("div");
     info.className = "entry-info";
     const name = sourceName(row.name, row.linearUrl);
     const times = document.createElement("p");
     times.className = "subtle";
-    times.textContent = row.ended === null
-      ? (paused ? "На паузе · " : "") + "С " + dateTime.format(row.started)
+    times.textContent = id === "active" && row.overtime ? "Сверх таймера · " + row.pomoMs / 60000 + " мин в журнале" : row.ended === null
+      ? (row.pomoMs ? "Помодоро · " : "") + (paused ? "На паузе · " : "") + "С " + dateTime.format(row.started)
       : dateTime.formatRange(row.started, row.ended);
     info.append(name, times);
     const actions = document.createElement("div");
@@ -247,8 +251,23 @@ function renderList(rows, id, timezone) {
     const clock = document.createElement("span");
     clock.className = "duration";
     actions.append(clock);
-    if (row.ended === null) {
-      if (paused) clock.textContent = duration(row.worked);
+    if (id === "active" && row.overtime) {
+      clock.dataset.started = row.ended;
+      clock.dataset.worked = 0;
+      for (const [choice, label] of [["accept", "Засчитать"], ["discard", "Отбросить"]]) {
+        const button = timerButton("history-action", label, row, () => change(choice, { interval: row.id }));
+        button.textContent = label;
+        actions.append(button);
+      }
+    } else if (row.ended === null) {
+      if (row.pomoMs) {
+        clock.dataset.limit = row.pomoMs;
+        const extend = timerButton("history-action", "Продлить помодоро", row,
+          () => change("extend", { interval: row.id, version: row.version }));
+        extend.textContent = "+5 мин";
+        actions.append(extend);
+      }
+      if (paused) clock.textContent = duration(timerElapsed(row, state.now));
       else {
         clock.dataset.started = row.runningSince ?? row.started;
         clock.dataset.worked = row.worked ?? 0;
@@ -265,6 +284,14 @@ function renderList(rows, id, timezone) {
       actions.append(stop);
     } else {
       clock.textContent = duration(row.worked ?? (row.ended - row.started));
+      if (state.pomodoro && !state.active.some(timer => timer.overtime && timer.id === row.id && id === "personal")) {
+        const edit = document.createElement("a");
+        edit.textContent = "Редактировать";
+        edit.href = new URL("/history/" + id + "/" + row.id + "/edit", state.trackerOrigin);
+        edit.target = "_blank";
+        edit.rel = "noopener noreferrer";
+        actions.append(edit);
+      }
       if (id === "personal" && timerControlsSupported) {
         const alreadyOpen = open.has(row.target);
         const restart = timerButton("history-action", alreadyOpen ? "К таймеру" : "Запустить снова", row,
@@ -293,12 +320,13 @@ function render(data, capabilities) {
   byId("target").hidden = false;
   byId("setup").hidden = true;
   sections.hidden = false;
+  byId("pomo").hidden = !data.pomodoro || !capabilities.pomoControls || data.active.some(row => row.target === data.target.slug);
   manual.hidden = data.target.kind !== "issue";
   projectIssues.hidden = !project;
   document.querySelector('[data-section="project-issues"]').hidden = !project;
   byId("zone").textContent = "Часовой пояс · " + data.timezone;
   quick.hidden = false;
-  const paused = data.active.filter(row => row.runningSince === null).length;
+  const paused = data.active.filter(row => row.runningSince === null && !row.overtime).length;
   byId("timer-counts").textContent = data.active.length
     ? `Идут ${data.active.length - paused}${paused ? ` · На паузе ${paused}` : ""}` : "";
   renderList(data.active, "active", data.timezone);
@@ -383,13 +411,23 @@ async function change(action, fields = {}) {
   try {
     const reply = await send(action, { ...fields, csrf: state.csrf, key: lastAction.key });
     if (before !== path) return;
-    if (reply.status !== 204) {
+    if (reply.status !== (action === "complete" ? 200 : 204)) {
       showError(reply, true);
       return;
     }
     lastAction = undefined;
     errors = false;
     status.textContent = action === "agent" ? "Запуск агента сохранён." : "";
+    if (reply.finishedIssue) {
+      byId("completion-message").textContent = "Время сохранено · " + reply.finishedIssue;
+      byId("complete-issue").dataset.interval = fields.interval;
+      byId("complete-issue").hidden = false;
+      byId("completion").hidden = false;
+      show(true);
+    } else if (action === "complete") {
+      byId("completion-message").textContent += " · " + reply.data.state;
+      byId("complete-issue").hidden = true;
+    }
     if (action === "agent") {
       agent.reset();
       manual.open = false;
@@ -403,6 +441,11 @@ async function change(action, fields = {}) {
   refresh();
   if (action === "restart") showSection("timer-overview");
 }
+
+byId("complete-issue").addEventListener("click", event => {
+  if (event.isTrusted) change("complete", { interval: Number(event.currentTarget.dataset.interval) });
+});
+byId("dismiss-completion").addEventListener("click", () => { byId("completion").hidden = true; });
 
 toolbarToggle.addEventListener("click", () => {
   show(panel.hidden);
@@ -418,10 +461,17 @@ for (const link of document.querySelectorAll("[data-section]")) {
 quick.addEventListener("click", event => {
   if (!event.isTrusted || !state) return;
   const running = state.active.find(row => row.target === state.target.slug);
-  if (running?.runningSince === null && timerControlsSupported) {
+  if (running?.overtime) {
+    show(true);
+    showSection("timer-overview");
+  } else if (running?.runningSince === null && timerControlsSupported) {
     change("resume", { interval: running.id, version: running.version });
   } else if (running) change("stop", { interval: running.id });
   else change("start");
+});
+byId("pomo-form").addEventListener("submit", event => {
+  event.preventDefault();
+  if (event.isTrusted) change("start", { minutes: event.currentTarget.elements.minutes.valueAsNumber });
 });
 agent.addEventListener("submit", event => {
   event.preventDefault();
@@ -437,6 +487,7 @@ window.addEventListener("message", event => {
     || event.data.path === path) return;
   path = event.data.path;
   state = undefined;
+  byId("completion").hidden = true;
   quick.hidden = true;
   sections.hidden = true;
   byId("target").hidden = true;

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1>Редактировать запись</h1>
+  <p>{{ entry_name }} · {{ 'Личное время' if kind == 'personal' else 'Запуск агента' }}</p>
+  <form method="post" class="interval-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="original_start" value="{{ row.started_ms }}">
+    <input type="hidden" name="original_end" value="{{ row.ended_ms }}">
+    <p class="muted">Часовой пояс · {{ timezone }}</p>
+    <div class="interval-fields">
+      <label>Начало<input type="datetime-local" name="started" step="0.001" value="{{ started }}" required></label>
+      <label>Окончание<input type="datetime-local" name="ended" step="0.001" value="{{ ended }}" required></label>
+    </div>
+    {% if kind == 'personal' and row.worked_ms is not none and row.ended_ms - row.started_ms > row.worked_ms %}
+    <p class="muted">Из длительности вычитается время пауз · {{ (row.ended_ms - row.started_ms - row.worked_ms) | clock }}</p>
+    {% endif %}
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    <div class="interval-fields">
+      <button type="submit" class="primary">Сохранить</button>
+      <a class="quiet" href="{{ cancel_url }}">Отмена</a>
+    </div>
+  </form>
+{% endblock %}
