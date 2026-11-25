@@ -764,6 +764,13 @@ input[aria-invalid="true"] { border-color: var(--danger); }
               linear-gradient(currentColor, currentColor) center / 100% 1px no-repeat;
 }
 
+.target-icon.calendar-nav-icon::before {
+  width: 11px;
+  height: 10px;
+  border-radius: 2px;
+  background: linear-gradient(currentColor, currentColor) 0 2px / 100% 1px no-repeat;
+}
+
 .target-icon.statistics-icon::before {
   width: 12px;
   height: 10px;

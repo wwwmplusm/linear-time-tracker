@@ -311,6 +311,11 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
         updated_dashboard = browser.get("/dashboard/state", headers={"X-Timer-Revision": rev_dashboard})
         assert updated_dashboard.status_code == 200
         assert f'action="/t/linear-{ISSUE}/start"' in updated_dashboard.text
+        def sidebar(path="/t/project"):
+            return browser.get(path).text.split('<nav id="workspace-nav"', 1)[1].split("</nav>", 1)[0]
+
+        assert f"/t/linear-{ISSUE}" in sidebar()
+        assert f"/t/linear-{UNASSIGNED}" in sidebar()
         stop_action = re.search(r'action="(/linear/stop/\d+\?dashboard=1)"', updated_dashboard.text)[1]
         stopped = browser.post(stop_action, data={"csrf": csrf})
         assert stopped.url.path == "/dashboard"
@@ -318,6 +323,11 @@ def test_linear_oauth_browse_start_and_link_publication(monkeypatch, tmp_path):
         assert focus_page.text.count(f'action="/linear/focus/{ISSUE}/remove"') == 1
         assert f'data-active-target="linear-{ISSUE}"' not in focus_page.text
         assert browser.post(f"/linear/focus/{ISSUE}/remove", data={"csrf": csrf}).status_code == 204
+        assert f"/t/linear-{ISSUE}" not in sidebar()
+        assert f"/t/linear-{UNASSIGNED}" not in sidebar("/t/project/state")
+        historical = browser.get(f"/t/linear-{ISSUE}")
+        assert f'/t/linear-{ISSUE}" aria-current="page"' in historical.text
+        assert "Первая задача" in browser.get("/t/project/state").text.split('<nav id="workspace-nav"', 1)[0]
         assert f"/linear/focus/{ISSUE}/remove" not in browser.get("/linear/state").text
         assert browser.get(f"/t/linear-{ISSUE}").status_code == 200
 

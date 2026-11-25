@@ -83,6 +83,10 @@ async function refresh() {
     if (state.dataset.revision !== updated.dataset.revision) {
       const focused = document.activeElement;
       const controlId = state.contains(focused) && focused.id;
+      const updatedTargets = documentFragment.querySelector("#workspace-nav .targets");
+      if (updatedTargets && targetList && targetList.innerHTML !== updatedTargets.innerHTML) {
+        targetList.replaceChildren(...updatedTargets.childNodes);
+      }
       state.replaceWith(updated);
       state = updated;
       if (controlId) {
@@ -123,3 +127,40 @@ document.addEventListener("click", event => {
   dialog.showModal();
   form.elements.pomo_minutes.select();
 });
+
+const stopDialog = document.querySelector("#stop-dialog");
+if (stopDialog) {
+  const review = stopDialog.querySelector("form");
+  const fields = review.elements;
+  let measured;
+  document.addEventListener("submit", event => {
+    const form = event.target;
+    if (!form.matches("[data-stop-elapsed]")) return;
+    event.preventDefault();
+    const duration = form.closest(".timer-actions").querySelector(".duration");
+    const elapsed = duration.hasAttribute("data-start")
+      ? Number(duration.dataset.worked) + Math.max(0, serverNow + performance.now() - syncedAt - Number(duration.dataset.start))
+      : Number(form.dataset.stopElapsed);
+    measured = Math.floor(elapsed / 1000);
+    review.action = form.action;
+    fields.hours.value = Math.floor(measured / 3600);
+    fields.minutes.value = Math.floor(measured / 60) % 60;
+    fields.seconds.value = measured % 60;
+    const clock = [fields.hours, fields.minutes, fields.seconds].map(field => field.value.padStart(2, "0")).join(":");
+    stopDialog.querySelector("[data-stop-summary]").textContent = form.dataset.stopName + " · " + clock;
+    fields.hours.setCustomValidity("");
+    stopDialog.showModal();
+  });
+  review.addEventListener("input", () => fields.hours.setCustomValidity(""));
+  review.addEventListener("submit", event => {
+    const total = Number(fields.hours.value) * 3600 + Number(fields.minutes.value) * 60 + Number(fields.seconds.value);
+    if (total > measured) {
+      event.preventDefault();
+      fields.hours.setCustomValidity("Введите длительность в пределах времени таймера.");
+      fields.hours.reportValidity();
+    } else {
+      fields.keep_seconds.value = total;
+    }
+  });
+  stopDialog.querySelector("[data-stop-cancel]").addEventListener("click", () => stopDialog.close());
+}

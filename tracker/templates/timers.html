@@ -68,7 +68,7 @@
               <span class="icon {{ 'icon-play' if paused else 'icon-pause' }}" aria-hidden="true"></span><span class="control-caption">{{ "Продолжить" if paused else "Пауза" }}</span>
             </button>
           </form>
-          <form method="post" action="{{ base_url }}/stop/{{ row.id }}{{ query }}">
+          <form method="post" action="{{ base_url }}/stop/{{ row.id }}{{ query }}" data-stop-elapsed="{{ elapsed }}" data-stop-name="{{ name }}">
             <input type="hidden" name="csrf" value="{{ csrf }}">
             <button class="secondary timer-control stop" id="timer-{{ row.id }}" type="submit" aria-label="Остановить таймер «{{ name }}»">
               <span class="icon icon-stop" aria-hidden="true"></span><span class="control-caption">Остановить</span>

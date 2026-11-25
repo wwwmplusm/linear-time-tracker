@@ -42,6 +42,23 @@
     {% block content %}{% endblock %}</main>
   {% if csrf %}</div>{% endif %}
   {% if start_key %}
+  <dialog class="focus-dialog" id="stop-dialog" aria-labelledby="stop-title">
+    <h2 id="stop-title">Сколько времени записать?</h2>
+    <p data-stop-summary></p>
+    <form method="post" class="interval-form">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="keep_seconds">
+      <div class="interval-fields">
+        {% for key, label in [('hours', 'Часы'), ('minutes', 'Минуты'), ('seconds', 'Секунды')] %}
+        <label>{{ label }}<input name="{{ key }}" type="number" min="0"{% if key != 'hours' %} max="59"{% endif %} required></label>
+        {% endfor %}
+      </div>
+      <div class="interval-fields">
+        <button class="primary">Записать время</button>
+        <button type="button" class="secondary" data-stop-cancel>Отмена</button>
+      </div>
+    </form>
+  </dialog>
   <dialog class="focus-dialog" id="pomo-dialog" aria-labelledby="pomo-title">
     <div class="focus-dialog-heading">
       <h2 id="pomo-title">Помодоро</h2>

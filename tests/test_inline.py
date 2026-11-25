@@ -183,6 +183,7 @@ def test_track_directly_inside_linear(tmp_path, inline_server, stale_worker, liv
         tracker.get_by_role("button", name="Продолжить таймер «Тестовая задача»").click()
         expect(panel.locator("#active").get_by_role("button", name="Приостановить таймер «Тестовая задача»")).to_be_visible(timeout=7000)
         tracker.get_by_role("button", name="Остановить таймер «Тестовая задача»", exact=True).click()
+        tracker.get_by_role("button", name="Записать время").click()
         saved = tracker.get_by_role("region", name="Завершение задачи Linear")
         expect(saved).to_contain_text("Время сохранено · Тестовая задача")
         saved.get_by_role("button", name="Завершить задачу в Linear").click()

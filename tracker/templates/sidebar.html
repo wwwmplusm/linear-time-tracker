@@ -9,6 +9,9 @@
       <span class="target-icon team" aria-hidden="true"></span><span class="target-name">Команды Linear</span>
     </a>
     {% endif %}
+    <a href="/calendar"{% if is_calendar %} aria-current="page"{% endif %}>
+      <span class="target-icon calendar-nav-icon" aria-hidden="true"></span><span class="target-name">Календарь</span>
+    </a>
     <a href="/statistics"{% if is_statistics %} aria-current="page"{% endif %}>
       <span class="target-icon statistics-icon" aria-hidden="true"></span><span class="target-name">Статистика</span>
     </a>
@@ -40,7 +43,9 @@
     {% endif %}
     {% if target is defined or (is_statistics and not linear_enabled) %}
     <p class="nav-title">Проекты и задачи</p>
-    {% for item in targets.values() if not item.slug.startswith('ticktick-') or item == target %}
+    {% set active_slugs = active | map(attribute='target') | list %}
+    {% for item in targets.values() if item.slug in configured_targets or item == target or
+          (item.slug.startswith('linear-') and (item.slug in active_slugs or item.slug in focus|default(()))) %}
     <div class="nav-row">
     <a href="{{ item.url }}"{% if item == target %} aria-current="page"{% endif %}>
       <span class="target-icon {{ item.kind }}" aria-hidden="true"></span><span class="target-name">{{ item.name }}</span>

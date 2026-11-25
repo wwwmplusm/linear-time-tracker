@@ -3,7 +3,7 @@ import hmac
 import re
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from secrets import token_urlsafe
@@ -13,11 +13,12 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Path as PathParam, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
+from tracker.calendar_catalog import CalendarCatalog, describe
 from tracker.config import Settings, Target
 from tracker.db import Database, elapsed_ms, now_ms, running_since
 from tracker.linear import LinearBrowse, LinearError, LinearIntegration, LinearSettings, tracker_target
@@ -33,6 +34,7 @@ SESSION_COOKIE = "tracker_session"
 LOGIN_COOKIE = "tracker_login"
 REQUEST_KEY = re.compile(r"[A-Za-z0-9_-]{32}")
 LOCAL_DATETIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,3})?)?")
+CALENDAR_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 Csrf = Annotated[str, Form(max_length=64)]
 Nonce = Annotated[str, Form(min_length=32, max_length=32)]
 IntervalId = Annotated[int, PathParam(ge=1, le=2**63 - 1)]
@@ -90,11 +92,21 @@ def interval_times(started: str, ended: str, zone: ZoneInfo) -> tuple[int, int]:
     return start_ms, end_ms
 
 
+def calendar_date(value: str) -> date:
+    try:
+        if CALENDAR_DATE.fullmatch(value):
+            return date.fromisoformat(value)
+    except ValueError:
+        pass
+    raise HTTPException(422, "Укажите дату в формате ГГГГ-ММ-ДД.")
+
+
 def create_app() -> FastAPI:
     settings = Settings.from_env()
     db = Database(settings.database, settings.database_url)
     linear_settings = LinearSettings.from_env()
     linear = LinearIntegration(db, linear_settings) if linear_settings else None
+    calendar_catalog = CalendarCatalog(linear) if linear else None
     password = hashlib.sha256(settings.password.encode()).digest()
     default_target = next(iter(settings.targets.values()))
     home_url = "/linear" if linear else default_target.url
@@ -113,6 +125,7 @@ def create_app() -> FastAPI:
         for path in static_dir.rglob("*") if path.is_file()
     }
     templates.env.globals["asset"] = lambda name: f"/static/{name}?v={asset_versions[name]}"
+    templates.env.globals["configured_targets"] = settings.targets
     templates.env.filters.update(
         clock=clock,
         utc=lambda ms: utc_datetime(ms).isoformat(timespec="milliseconds"),
@@ -270,6 +283,7 @@ def create_app() -> FastAPI:
             return Response(status_code=204, headers={"X-Tracker-Now": str(now_ms())})
         context = {
             "target": target,
+            "partial": partial,
             "completion_prompt": None if partial else completion_prompt(request),
             "targets": all_targets(),
             "linear_enabled": linear is not None,
@@ -354,6 +368,110 @@ def create_app() -> FastAPI:
         period, anchor, _ = selection
         return sign_in(request, credential, nonce, statistics_url(period, anchor))
 
+    def calendar_selection(week: Annotated[str | None, Query(max_length=10)] = None):
+        today = datetime.now(settings.timezone).date()
+        anchor = today if week is None else calendar_date(week)
+        monday = anchor - timedelta(days=anchor.weekday())
+        try:
+            days = [(monday + timedelta(days=offset)).isoformat() for offset in range(7)]
+            previous_week = (monday - timedelta(days=7)).isoformat()
+            next_week = (monday + timedelta(days=7)).isoformat()
+        except OverflowError as error:
+            raise HTTPException(422, "Дата вне доступного диапазона.") from error
+        destination = "/calendar" if week is None else f"/calendar?week={week}"
+        return days, today.isoformat(), previous_week, next_week, destination
+
+    @app.get("/calendar", response_class=HTMLResponse)
+    def calendar(request: Request, selection=Depends(calendar_selection)):
+        days, today, previous_week, next_week, destination = selection
+        try:
+            token = require_session(request)
+        except HTTPException:
+            return render_login(request, destination)
+        back_url = "/dashboard" if linear else default_target.url
+        rows = linear_targets()
+        targets = all_targets(rows)
+        references = {"linear-" + row["id"]: row["reference"] for row in rows}
+        details = {slug: describe(target.name, team=references.get(slug, "").split("-")[0],
+                                  project=target.name if target.kind == "project" else "")
+                   for slug, target in targets.items()}
+        return templates.TemplateResponse(request, "calendar.html", {
+            "page_title": "Календарь",
+            "is_calendar": True,
+            "focus": db.focus_tasks() if linear else (),
+            "days": days,
+            "today": today,
+            "previous_week": previous_week,
+            "next_week": next_week,
+            "blocks": db.calendar_blocks(days[0], days[-1]),
+            "targets": targets,
+            "catalog_details": details,
+            "linear_enabled": linear is not None,
+            "journal_url": default_target.url,
+            "active_url": back_url + "#active",
+            "timezone": settings.timezone.key,
+            "csrf": csrf_token(token),
+            "active": db.active_timers(),
+        })
+
+    @app.get("/calendar/catalog")
+    def live_calendar_catalog(request: Request, token: str = Depends(require_session)):
+        if not calendar_catalog:
+            return {}
+        try:
+            items = calendar_catalog.load()
+        except LinearError as error:
+            raise HTTPException(503, str(error)) from error
+        revision = hashlib.sha256(repr(items).encode()).hexdigest()
+        if request.headers.get("If-None-Match") == '"' + revision + '"':
+            return Response(status_code=304)
+        return JSONResponse(items, headers={"ETag": '"' + revision + '"'})
+
+    @app.post("/calendar/login")
+    def calendar_login(
+        request: Request, credential: Annotated[str, Form(max_length=4096)], nonce: Nonce,
+        selection=Depends(calendar_selection),
+    ):
+        return sign_in(request, credential, nonce, selection[-1])
+
+    @app.post("/calendar/blocks/{block_id}", status_code=204, response_class=Response)
+    def save_calendar_block(
+        block_id: UUID,
+        target: Annotated[str, Form()],
+        day: Annotated[str, Form(max_length=10)],
+        duration: Annotated[int, Form(ge=1, le=1440)],
+        version: TimerVersion,
+        start_minute: Annotated[int | None, Form(ge=0, le=1439)] = None,
+        token: str = Depends(require_post),
+    ):
+        block_day = calendar_date(day).isoformat()
+        if start_minute is not None and start_minute + duration > 1440:
+            raise HTTPException(422, "Блок должен закончиться в тот же день.")
+        try:
+            get_target(target)
+        except HTTPException as error:
+            if error.status_code != 404 or not calendar_catalog:
+                raise
+            try:
+                item = calendar_catalog.load().get(target)
+                if not item:
+                    raise error
+                linear.import_target(item.get("kind", "issue"), target.removeprefix("linear-"))
+            except LinearError as sync_error:
+                raise HTTPException(503, str(sync_error)) from sync_error
+        if not db.save_calendar_block(str(block_id), target, block_day, start_minute, duration, version):
+            raise HTTPException(409)
+        return Response(status_code=204)
+
+    @app.post("/calendar/blocks/{block_id}/delete", status_code=204, response_class=Response)
+    def delete_calendar_block(
+        block_id: UUID, version: Annotated[int, Form(ge=1, le=2**63 - 1)],
+        token: str = Depends(require_post),
+    ):
+        if not db.delete_calendar_block(str(block_id), version):
+            raise HTTPException(409)
+        return Response(status_code=204)
+
     @app.get("/t/{slug}", response_class=HTMLResponse)
     def page(request: Request, target: Target = Depends(get_target)):
         try:
@@ -406,8 +524,9 @@ def create_app() -> FastAPI:
         return RedirectResponse(target.url, status_code=303)
 
     @app.post("/t/{slug}/stop/{interval_id}")
-    def stop(interval_id: IntervalId, target: Target = Depends(get_target), token: str = Depends(require_post)):
-        db.stop(interval_id)
+    def stop(interval_id: IntervalId, keep_seconds: Annotated[int | None, Form(ge=0, le=9_000_000_000_000)] = None,
+             target: Target = Depends(get_target), token: str = Depends(require_post)):
+        db.stop(interval_id, keep_seconds)
         return after_stop(target.url, interval_id)
 
     @app.post("/t/{slug}/timers/{action}/{interval_id}")
@@ -455,6 +574,7 @@ def create_app() -> FastAPI:
 
         return templates.TemplateResponse(request, "edit.html", {
             "page_title": "Редактировать запись", "target": target, "targets": targets,
+            "focus": db.focus_tasks() if linear else (),
             "entry_name": targets[row["target"]].name if row["target"] in targets else row["target"],
             "journal_url": target.url, "active_url": target.url + "#active", "kind": kind,
             "csrf": csrf_token(token), "active": db.active_timers(), "linear_enabled": linear is not None,
@@ -936,10 +1056,10 @@ def create_app() -> FastAPI:
 
         @app.post("/linear/stop/{interval_id}")
         def linear_stop(
-            interval_id: IntervalId, dashboard: bool = False,
+            interval_id: IntervalId, dashboard: bool = False, keep_seconds: Annotated[int | None, Form(ge=0, le=9_000_000_000_000)] = None,
             selection: LinearBrowse = Depends(linear_selection), token: str = Depends(require_post),
         ):
-            db.stop(interval_id)
+            db.stop(interval_id, keep_seconds)
             return after_stop("/dashboard" if dashboard else selection.url, interval_id)
 
         @app.post("/linear/timers/{action}/{interval_id}")

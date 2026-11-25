@@ -85,6 +85,18 @@ CREATE TABLE IF NOT EXISTS ticktick_sessions (
     interval_id INTEGER NOT NULL UNIQUE REFERENCES intervals(id),
     type INTEGER NOT NULL CHECK (type IN (0, 1))
 );
+
+CREATE TABLE IF NOT EXISTS calendar_blocks (
+    id TEXT PRIMARY KEY,
+    target TEXT NOT NULL,
+    day TEXT NOT NULL,
+    start_minute INTEGER CHECK (start_minute BETWEEN 0 AND 1439),
+    duration INTEGER NOT NULL CHECK (duration BETWEEN 1 AND 1440),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
+    CHECK (start_minute + duration <= 1440)
+);
+CREATE INDEX IF NOT EXISTS calendar_blocks_day ON calendar_blocks(day) WHERE deleted = 0;
 """
 
 POSTGRES_LOCK_NAMESPACE = 1279872596
@@ -303,9 +315,9 @@ class Database:
         with self.timer_transaction() as (conn, _):
             return self._active_timers(conn)
 
-    def stop(self, interval_id: int) -> None:
+    def stop(self, interval_id: int, keep_seconds: int | None = None) -> None:
         with self.timer_transaction(write=True) as (conn, now):
-            conn.execute(
+            stopped = conn.execute(
                 """
                 UPDATE intervals SET
                     ended_ms = greatest(coalesce(paused_ms, segment_started_ms, started_ms), ?),
@@ -318,6 +330,13 @@ class Database:
                 """,
                 (now, now, interval_id),
             )
+
+            if stopped.rowcount and keep_seconds is not None:
+                keep_ms = keep_seconds * 1000
+                conn.execute(
+                    "UPDATE intervals SET worked_ms = ? WHERE id = ? AND worked_ms > ?",
+                    (keep_ms, interval_id, keep_ms),
+                )
 
     def pause(self, interval_id: int, version: int) -> None:
         with self.timer_transaction(write=True) as (conn, now):
@@ -427,6 +446,43 @@ class Database:
                 """,
                 (start_ms, end_ms),
             ).fetchall()
+
+    def calendar_blocks(self, monday: str, sunday: str) -> list[dict]:
+        with self.transaction() as conn:
+            rows = conn.execute(
+                """SELECT id, target, day, start_minute, duration, version
+                   FROM calendar_blocks WHERE deleted = 0 AND day BETWEEN ? AND ?
+                   ORDER BY day, COALESCE(start_minute, -1), id""",
+                (monday, sunday),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def save_calendar_block(self, block_id: str, target: str, day: str,
+                            start_minute: int | None, duration: int, version: int) -> bool:
+        with self.transaction(write=True) as conn:
+            if version == 0:
+                result = conn.execute(
+                    """INSERT INTO calendar_blocks (id, target, day, start_minute, duration)
+                       VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING""",
+                    (block_id, target, day, start_minute, duration),
+                )
+            else:
+                result = conn.execute(
+                    """UPDATE calendar_blocks
+                       SET target = ?, day = ?, start_minute = ?, duration = ?, version = version + 1
+                       WHERE id = ? AND version = ? AND deleted = 0 AND version < 9223372036854775807""",
+                    (target, day, start_minute, duration, block_id, version),
+                )
+            return result.rowcount == 1
+
+    def delete_calendar_block(self, block_id: str, version: int) -> bool:
+        with self.transaction(write=True) as conn:
+            # Retain the ID so a delayed create retry cannot resurrect a deleted block.
+            result = conn.execute(
+                "UPDATE calendar_blocks SET deleted = 1 WHERE id = ? AND version = ? AND deleted = 0",
+                (block_id, version),
+            )
+            return result.rowcount == 1
 
     def snapshot(self) -> tuple[list[Row], list[Row], list[Row]]:
         with self.timer_transaction() as (conn, _):

@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% set page_title = "Календарь" %}
+{% block head %}
+<link rel="stylesheet" href="{{ asset('calendar.css') }}">
+<script src="{{ asset('calendar.js') }}" defer></script>
+{% endblock %}
+{% block content %}
+{% set weekdays = ('Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье') %}
+{% set short_days = ('Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс') %}
+{% set months = ('января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря') %}
+{% macro date_label(day) %}{{ day[8:] | int }} {{ months[(day[5:7] | int) - 1] }}{% endmacro %}
+{% macro task(slug, item) %}
+<li><button type="button" class="cal-task" data-task="{{ slug }}" draggable="true" {% if slug in focus|default([]) %}data-focus{% endif %}><span class="cal-dot" aria-hidden="true"></span><span>{{ item.name }}</span></button></li>
+{% endmacro %}
+{% macro event(block) %}
+{% set name = targets[block.target].name if block.target in targets else block.target %}
+<button type="button" class="cal-event" draggable="true" data-block="{{ block.id }}" data-target="{{ block.target }}" data-duration="{{ block.duration }}" data-version="{{ block.version }}"{% if block.start_minute is not none %} data-start="{{ block.start_minute }}"{% endif %}>
+  {% if block.start_minute is not none %}<span class="cal-event-time">{{ '%02d:%02d' | format(block.start_minute // 60, block.start_minute % 60) }}</span>{% endif %}
+  <span class="cal-event-name">{{ name }}</span>
+</button>
+{% endmacro %}
+<script id="calendar-details" type="application/json">{{ catalog_details | tojson }}</script>
+<section class="cal"{% if linear_enabled %} data-linear-catalog{% endif %} data-calendar data-today="{{ today }}" data-timezone="{{ timezone|default('') }}">
+  <header class="cal-header">
+    <div>
+      <h1>Календарь</h1>
+      <p class="cal-range">{% if days[0][:4] != days[-1][:4] %}{{ date_label(days[0]) }} {{ days[0][:4] }}{% elif days[0][:7] == days[-1][:7] %}{{ days[0][8:] | int }}{% else %}{{ date_label(days[0]) }}{% endif %} — {{ date_label(days[-1]) }} {{ days[-1][:4] }}</p>
+    </div>
+    <div class="cal-actions">
+      <nav class="cal-week-nav" aria-label="Навигация по неделям">
+        <a class="quiet" href="/calendar?week={{ previous_week }}" aria-label="Предыдущая неделя">←</a>
+        <a class="quiet" href="/calendar">Сегодня</a>
+        <a class="quiet" href="/calendar?week={{ next_week }}" aria-label="Следующая неделя">→</a>
+      </nav>
+      <button type="button" class="primary" data-new {% if not targets %}disabled{% endif %}>＋ Блок</button>
+    </div>
+  </header>
+
+  <p class="cal-status" role="status" aria-live="polite"></p>
+  <div class="cal-layout">
+    <div class="cal-board">
+      <div class="cal-scroll" tabindex="0" role="region" aria-label="Расписание на неделю">
+        <div class="cal-week">
+          <div class="cal-week-head">
+            <div class="cal-dates">
+              <div></div>
+              {% for day in days %}
+              <div class="cal-date{% if loop.index > 5 %} cal-weekend{% endif %}"{% if day == today %} aria-current="date"{% endif %}>
+                <time datetime="{{ day }}" aria-label="{{ weekdays[loop.index0] }}, {{ date_label(day) }}">
+                  <span>{{ short_days[loop.index0] }}</span><strong>{{ day[8:] | int }}</strong>
+                </time>
+                <button type="button" class="quiet cal-day-add" data-new-day="{{ day }}" aria-label="Добавить блок · {{ weekdays[loop.index0] }}, {{ date_label(day) }}" {% if not targets %}disabled{% endif %}>+</button>
+              </div>
+              {% endfor %}
+            </div>
+            <div class="cal-all-day">
+              <div class="cal-all-day-label">Весь<br>день</div>
+              {% for day in days %}
+              <div class="cal-lane{% if loop.index > 5 %} cal-weekend{% endif %}" data-day="{{ day }}" data-all-day aria-label="Весь день · {{ date_label(day) }}">
+                {% for block in blocks if block.day == day and block.start_minute is none %}{{ event(block) }}{% endfor %}
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          <div class="cal-hours">
+            <div class="cal-times" aria-hidden="true">
+              {% for hour in range(24) %}<span>{{ '%02d:00' | format(hour) }}</span>{% endfor %}
+            </div>
+            {% for day in days %}
+            <div class="cal-day{% if loop.index > 5 %} cal-weekend{% endif %}" data-day="{{ day }}" aria-label="{{ weekdays[loop.index0] }}, {{ date_label(day) }}">
+              {% for block in blocks if block.day == day and block.start_minute is not none %}{{ event(block) }}{% endfor %}
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <aside class="cal-tray" aria-labelledby="cal-tasks-title">
+      <h2 id="cal-tasks-title">Задачи и проекты</h2>
+      <label class="cal-search">
+        <span class="cal-sr">Поиск задач и проектов</span>
+        <input type="search" placeholder="Найти задачу или проект" autocomplete="off">
+      </label>
+      <label class="cal-group">Группировать
+        <select data-group><option value="area">По сферам</option><option value="project">По проектам</option><option value="lesson">По урокам</option><option value="priority">По приоритетам</option></select>
+      </label>
+      <small data-sync-status role="status"></small>
+      <ul class="cal-tasks">
+        {% for slug in focus|default([]) if slug in targets %}{{ task(slug, targets[slug]) }}{% endfor %}
+        {% for slug, item in targets.items() if slug not in focus|default([]) %}{{ task(slug, item) }}{% endfor %}
+      </ul>
+      <p class="cal-empty" role="status"{% if targets %} hidden{% endif %}>Задачи и проекты не найдены</p>
+    </aside>
+  </div>
+
+  <dialog class="cal-dialog" aria-labelledby="cal-dialog-title">
+    <div class="cal-dialog-heading">
+      <h2 id="cal-dialog-title">Новый блок</h2>
+      <button class="quiet" type="button" data-close aria-label="Закрыть">×</button>
+    </div>
+    <form class="cal-form">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>Задача или проект
+        <select name="target" required>
+          {% for slug in focus|default([]) if slug in targets %}<option value="{{ slug }}">{{ targets[slug].name }}</option>{% endfor %}
+          {% for slug, item in targets.items() if slug not in focus|default([]) %}<option value="{{ slug }}">{{ item.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <p class="cal-card-details" data-card-details></p>
+      <label>Дата <input type="date" name="day" required></label>
+      <label class="cal-check"><input type="checkbox" name="all_day"> Весь день</label>
+      <div class="cal-time-fields">
+        <label data-time-field>Начало <input type="time" name="time" required></label>
+        <label>Длительность, мин <input type="number" name="duration" min="1" max="1440" required></label>
+      </div>
+      <p class="cal-form-status" role="alert" hidden></p>
+      <div class="cal-form-actions">
+        <button class="quiet cal-delete" type="button" data-delete hidden>Удалить</button>
+        <button class="primary" type="submit">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+</section>
+{% endblock %}

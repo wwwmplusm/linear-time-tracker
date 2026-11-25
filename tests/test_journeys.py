@@ -122,6 +122,9 @@ def test_parallel_timers_sync_and_survive_restart(server, browsers):
     assert phone.evaluate("document.documentElement.scrollWidth === innerWidth")
 
     phone.get_by_role("button", name="Остановить таймер «Задача A»", exact=True).click()
+    phone.get_by_role("dialog").get_by_label("Секунды").fill("1")
+    phone.get_by_role("button", name="Записать время").click()
+    expect(phone.locator("#personal-journal .duration")).to_have_text("00:00:01")
     expect(active_row(phone, "Задача A")).to_have_count(0)
     expect(phone.locator("#personal-journal .entry-main").get_by_role("link")).to_have_text("Задача A")
     with laptop.expect_response(lambda res: res.url.endswith("/t/issue-b/state")):
@@ -177,6 +180,7 @@ def test_concurrent_start_and_retry_of_old_actions(server, browsers):
     old_stop = old_form.get_attribute("action")
     old_body = old_form.evaluate("(form) => Object.fromEntries(new FormData(form))")
     old_form.get_by_role("button").click()
+    laptop.get_by_role("button", name="Записать время").click()
     old_end = server.rows("SELECT ended_ms FROM intervals")[0][0]
     assert old_end >= old_start
 
@@ -216,6 +220,7 @@ def test_pause_and_restart_from_history(server, browsers):
     phone.get_by_role("button", name="Продолжить таймер «Задача A»").click()
     expect(laptop.get_by_role("button", name="Приостановить таймер «Задача A»")).to_be_visible(timeout=6500)
     phone.get_by_role("button", name="Остановить таймер «Задача A»", exact=True).click()
+    phone.get_by_role("button", name="Записать время").click()
     history = phone.locator("#personal-journal")
     expect(history.locator("li")).to_have_count(1)
     history.get_by_role("button", name="Запустить снова «Задача A»").click()
@@ -282,3 +287,64 @@ def test_pomodoro_overtime_and_edit(server, browsers):
     phone.get_by_role("button", name="Сохранить", exact=True).click()
     expect(phone.locator("#personal-journal .duration")).to_have_text("01:00:00")
     assert server.rows("SELECT count(*), worked_ms, started_ms % 1000 FROM intervals") == [(1, 3600000, 123)]
+
+
+def test_calendar_opens_from_tracker_navigation(server, browsers):
+    laptop, _ = browsers
+    sign_in(laptop, "issue-a")
+    calendar = laptop.get_by_role("navigation").get_by_role("link", name="Календарь", exact=True)
+    expect(calendar).to_have_count(1, timeout=1000)
+    calendar.click()
+    expect(laptop).to_have_url(server.base_url + "/calendar")
+    expect(laptop.get_by_role("link", name="Календарь", exact=True)).to_have_attribute("aria-current", "page")
+    search = laptop.get_by_placeholder("Найти задачу или проект")
+    group = laptop.get_by_label("Группировать")
+    group.select_option("priority")
+    expect(laptop.locator(".cal-section", has_text="Без приоритета")).to_be_visible()
+    group.select_option("project")
+    expect(laptop.locator(".cal-section", has_text="Учебный проект")).to_be_visible()
+    group.select_option("area")
+    search.fill("Задача A")
+    monday = laptop.locator("[data-all-day]").nth(0)
+    tuesday = laptop.locator(".cal-day").nth(1)
+    laptop.locator('[data-task="issue-a"]').drag_to(monday)
+    block = monday.locator('[data-target="issue-a"]')
+    expect(block).to_be_visible()
+    block_id = block.get_attribute("data-block")
+    block.drag_to(tuesday)
+    moved = tuesday.locator(f'[data-block="{block_id}"]')
+    expect(moved).to_have_attribute("data-version", "2")
+    assert int(moved.get_attribute("data-start")) % 15 == 0
+    expect(search).to_have_value("Задача A")
+    laptop.reload()
+    moved.click()
+    editor = laptop.get_by_role("dialog")
+    editor.get_by_label("Начало").fill("14:30")
+    editor.get_by_label("Длительность, мин").fill("45")
+    scroll = laptop.locator(".cal-scroll")
+    position = scroll.evaluate("el => el.scrollTop")
+    document_time = laptop.evaluate("performance.timeOrigin")
+    editor.get_by_role("button", name="Сохранить").click()
+    expect(moved).to_have_attribute("data-start", "870")
+    expect(moved).to_have_attribute("data-duration", "45")
+    assert laptop.evaluate("performance.timeOrigin") == document_time
+    assert scroll.evaluate("el => el.scrollTop") == position
+    assert server.rows("SELECT count(*) FROM intervals") == [(0,)]
+    next_week_url = laptop.get_by_role("link", name="Следующая неделя").get_attribute("href")
+    next_monday = next_week_url.split("week=")[1]
+    moved.click()
+    editor.get_by_label("Дата", exact=True).fill(next_monday)
+    editor.get_by_role("button", name="Сохранить").click()
+    expect(laptop).to_have_url(server.base_url + next_week_url)
+    expect(laptop.locator(f'[data-day="{next_monday}"] [data-block="{block_id}"]')).to_be_visible()
+    _, phone = browsers
+    sign_in(phone, "issue-b")
+    phone.goto(next_week_url)
+    assert phone.evaluate("document.documentElement.scrollWidth === innerWidth")
+    phone.get_by_role("button", name="＋ Блок").click()
+    expect(phone.get_by_role("dialog").get_by_label("Дата", exact=True)).to_be_visible()
+    laptop.locator(f'[data-block="{block_id}"]').click()
+    document_time = laptop.evaluate("performance.timeOrigin")
+    editor.get_by_role("button", name="Удалить").click()
+    expect(laptop.locator(f'[data-block="{block_id}"]')).to_have_count(0)
+    assert laptop.evaluate("performance.timeOrigin") == document_time
