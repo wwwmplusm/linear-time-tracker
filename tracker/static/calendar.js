@@ -2,10 +2,14 @@
   const calendar = document.querySelector("[data-calendar]");
   const scroll = calendar.querySelector(".cal-scroll");
   const days = [...calendar.querySelectorAll(".cal-day")];
-  const localDetails = JSON.parse(document.querySelector("#calendar-details").textContent);
+  const { items: localDetails, focus: focusOrder } = JSON.parse(
+    document.querySelector("#calendar-details").textContent
+  );
   let details = localDetails;
   const tray = calendar.querySelector(".cal-tasks");
-  const focus = new Set([...tray.querySelectorAll("[data-focus]")].map(node => node.dataset.task));
+  const empty = calendar.querySelector(".cal-empty");
+  const focus = new Set(focusOrder);
+  const collator = new Intl.Collator("ru");
   const groups = calendar.querySelector("[data-group]");
   const search = calendar.querySelector('input[type="search"]');
   const areas = {
@@ -175,54 +179,79 @@
     return item.priority;
   }
 
+  function indexTasks(order) {
+    return order.map(slug => {
+      const item = details[slug];
+      const subtitle = caption(item);
+      return {
+        slug, item, subtitle,
+        label: [item.name, subtitle, item.summary, areas[item.area][0]].join(" ").toLocaleLowerCase("ru"),
+        row: null,
+      };
+    }).sort((a, b) =>
+      Number(focus.has(b.slug)) - Number(focus.has(a.slug)) ||
+      collator.compare(a.item.name, b.item.name));
+  }
+
+  function taskRow({ slug, item, subtitle }) {
+    const row = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "cal-task";
+    button.draggable = true;
+    button.dataset.task = slug;
+    button.toggleAttribute("data-focus", focus.has(slug));
+    setColor(button, slug);
+    const dot = document.createElement("span");
+    dot.className = "cal-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const text = document.createElement("span");
+    text.textContent = item.name;
+    const captionText = document.createElement("small");
+    captionText.textContent = subtitle;
+    text.append(captionText);
+    if (item.summary) {
+      const summary = document.createElement("small");
+      summary.className = "cal-summary";
+      summary.textContent = item.summary;
+      text.append(summary);
+      button.title = item.summary;
+    }
+    button.append(dot, text);
+    row.append(button);
+    return row;
+  }
+
+  const localSlugs = Object.keys(localDetails);
+  const sortedLocalSlugs = [...localSlugs].sort();
+  let tasks = indexTasks(sortedLocalSlugs);
+  let optionsReady = false;
+  let optionOrder = [...focusOrder, ...localSlugs.filter(slug => !focus.has(slug))];
+
   function renderTasks() {
-    const words = search.value.trim().toLocaleLowerCase("ru").split(/\s+/);
+    const query = search.value.trim().toLocaleLowerCase("ru");
+    const words = query ? query.split(/\s+/) : [];
     const sections = new Map();
-    const sorted = Object.entries(details).sort(([a, left], [b, right]) =>
-      Number(focus.has(b)) - Number(focus.has(a)) || left.name.localeCompare(right.name, "ru"));
-    for (const [slug, item] of sorted) {
-      const label = [item.name, caption(item), item.summary, areas[item.area][0]].join(" ").toLocaleLowerCase("ru");
-      if (!words.every(word => label.includes(word))) continue;
-      const group = groupName(item);
+    for (const task of tasks) {
+      if (!words.every(word => task.label.includes(word))) continue;
+      const group = groupName(task.item);
       if (!sections.has(group)) sections.set(group, []);
-      const row = document.createElement("li");
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "cal-task";
-      button.draggable = true;
-      button.dataset.task = slug;
-      button.toggleAttribute("data-focus", focus.has(slug));
-      setColor(button, slug);
-      const dot = document.createElement("span");
-      dot.className = "cal-dot";
-      const text = document.createElement("span");
-      text.textContent = item.name;
-      const subtitle = document.createElement("small");
-      subtitle.textContent = caption(item);
-      text.append(subtitle);
-      if (item.summary) {
-        const summary = document.createElement("small");
-        summary.className = "cal-summary";
-        summary.textContent = item.summary;
-        text.append(summary);
-        button.title = item.summary;
-      }
-      button.append(dot, text);
-      row.append(button);
-      sections.get(group).push(row);
+      task.row ??= taskRow(task);
+      sections.get(group).push(task.row);
     }
     const list = document.createDocumentFragment();
     const priorities = ["Срочно", "Высокий", "Средний", "Низкий", "Без приоритета"];
     const ordered = [...sections].sort(([a], [b]) => groups.value === "priority"
-      ? priorities.indexOf(a) - priorities.indexOf(b) : a.localeCompare(b, "ru"));
+      ? priorities.indexOf(a) - priorities.indexOf(b) : collator.compare(a, b));
     for (const [group, rows] of ordered) {
       const heading = document.createElement("li");
       heading.className = "cal-section";
       heading.textContent = group;
-      list.append(heading, ...rows);
+      list.append(heading);
+      for (const row of rows) list.append(row);
     }
     tray.replaceChildren(list);
-    calendar.querySelector(".cal-empty").hidden = sections.size > 0;
+    empty.hidden = sections.size > 0;
   }
   renderTasks();
   search.addEventListener("input", renderTasks);
@@ -248,10 +277,13 @@
         const fresh = await response.json();
         if (dragging || dialog.open || pending) return;
         const used = new Set([...calendar.querySelectorAll("[data-block]")].map(block => block.dataset.target));
-        const retained = Object.fromEntries(Object.entries(localDetails).filter(([slug]) =>
-          !slug.startsWith("linear-") || used.has(slug) || focus.has(slug)));
+        const retained = Object.fromEntries(sortedLocalSlugs.filter(slug =>
+          !slug.startsWith("linear-") || used.has(slug) || focus.has(slug))
+          .map(slug => [slug, localDetails[slug]]));
         details = { ...retained, ...fresh };
-        fields.target.replaceChildren(...Object.entries(details).map(([slug, item]) => new Option(item.name, slug)));
+        optionOrder = Object.keys(details);
+        tasks = indexTasks(optionOrder);
+        optionsReady = false;
         renderTasks();
         calendar.querySelectorAll("[data-block]").forEach(labelBlock);
         etag = response.headers.get("X-Catalog-Revision") || "";
@@ -275,7 +307,13 @@
   }
 
   function openEditor({ id, target, day, start, duration, version }) {
-    if (pending || !fields.target.options.length) return;
+    if (pending || !optionOrder.length) return;
+    if (!optionsReady) {
+      const options = document.createDocumentFragment();
+      for (const slug of optionOrder) options.append(new Option(details[slug].name, slug));
+      fields.target.replaceChildren(options);
+      optionsReady = true;
+    }
     editing = { id, version };
     formStatus.hidden = true;
     dialog.querySelector("h2").textContent = id ? "Редактировать блок" : "Новый блок";

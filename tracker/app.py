@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Path as PathParam, Qu
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from jinja2.utils import htmlsafe_json_dumps
 from starlette.concurrency import run_in_threadpool
 
 from tracker.calendar_catalog import CalendarCatalog, describe
@@ -392,20 +393,26 @@ def create_app() -> FastAPI:
         rows = linear_targets()
         targets = all_targets(rows)
         references = {"linear-" + row["id"]: row["reference"] for row in rows}
-        details = {slug: describe(target.name, team=references.get(slug, "").split("-")[0],
-                                  project=target.name if target.kind == "project" else "")
-                   for slug, target in targets.items()}
+        details = {}
+        for slug, target in targets.items():
+            item = describe(target.name, team=references.get(slug, "").split("-")[0],
+                            project=target.name if target.kind == "project" else "")
+            details[slug] = {key: value for key, value in item.items() if value or key == "name"}
+        focus = db.focus_tasks() if linear else ()
+        catalog_json = htmlsafe_json_dumps({
+            "items": details,
+            "focus": [slug for slug in focus if slug in details],
+        }, ensure_ascii=False, separators=(",", ":"))
         return templates.TemplateResponse(request, "calendar.html", {
             "page_title": "Календарь",
             "is_calendar": True,
-            "focus": db.focus_tasks() if linear else (),
             "days": days,
             "today": today,
             "previous_week": previous_week,
             "next_week": next_week,
             "blocks": db.calendar_blocks(days[0], days[-1]),
             "targets": targets,
-            "catalog_details": details,
+            "catalog_json": catalog_json,
             "linear_enabled": linear is not None,
             "journal_url": default_target.url,
             "active_url": back_url + "#active",

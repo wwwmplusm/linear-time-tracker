@@ -9,9 +9,6 @@
 {% set short_days = ('Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс') %}
 {% set months = ('января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря') %}
 {% macro date_label(day) %}{{ day[8:] | int }} {{ months[(day[5:7] | int) - 1] }}{% endmacro %}
-{% macro task(slug, item) %}
-<li><button type="button" class="cal-task" data-task="{{ slug }}" draggable="true" {% if slug in focus|default([]) %}data-focus{% endif %}><span class="cal-dot" aria-hidden="true"></span><span>{{ item.name }}</span></button></li>
-{% endmacro %}
 {% macro event(block) %}
 {% set name = targets[block.target].name if block.target in targets else block.target %}
 <button type="button" class="cal-event" draggable="true" data-block="{{ block.id }}" data-target="{{ block.target }}" data-duration="{{ block.duration }}" data-version="{{ block.version }}"{% if block.start_minute is not none %} data-start="{{ block.start_minute }}"{% endif %}>
@@ -19,7 +16,7 @@
   <span class="cal-event-name">{{ name }}</span>
 </button>
 {% endmacro %}
-<script id="calendar-details" type="application/json">{{ catalog_details | tojson }}</script>
+<script id="calendar-details" type="application/json">{{ catalog_json }}</script>
 <section class="cal"{% if linear_enabled %} data-linear-catalog{% endif %} data-calendar data-today="{{ today }}" data-timezone="{{ timezone|default('') }}">
   <header class="cal-header">
     <div>
@@ -86,10 +83,7 @@
         <select data-group><option value="area">По сферам</option><option value="project">По проектам</option><option value="lesson">По урокам</option><option value="priority">По приоритетам</option></select>
       </label>
       <small data-sync-status role="status"></small>
-      <ul class="cal-tasks">
-        {% for slug in focus|default([]) if slug in targets %}{{ task(slug, targets[slug]) }}{% endfor %}
-        {% for slug, item in targets.items() if slug not in focus|default([]) %}{{ task(slug, item) }}{% endfor %}
-      </ul>
+      <ul class="cal-tasks"></ul>
       <p class="cal-empty" role="status"{% if targets %} hidden{% endif %}>Задачи и проекты не найдены</p>
     </aside>
   </div>
@@ -102,10 +96,7 @@
     <form class="cal-form">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label>Задача или проект
-        <select name="target" required>
-          {% for slug in focus|default([]) if slug in targets %}<option value="{{ slug }}">{{ targets[slug].name }}</option>{% endfor %}
-          {% for slug, item in targets.items() if slug not in focus|default([]) %}<option value="{{ slug }}">{{ item.name }}</option>{% endfor %}
-        </select>
+        <select name="target" required></select>
       </label>
       <p class="cal-card-details" data-card-details></p>
       <label>Дата <input type="date" name="day" required></label>
