@@ -200,14 +200,26 @@ def create_app() -> FastAPI:
             return conn.execute("SELECT * FROM linear_targets ORDER BY kind DESC, name, id").fetchall()
 
     def all_targets(rows=None):
-        imported = (tracker_target(row) for row in (linear_targets() if rows is None else rows))
+        if rows is None:
+            rows = linear_targets()
         with db.transaction() as conn:
             ticktick = conn.execute("SELECT slug, name FROM ticktick_targets").fetchall()
+        return target_map(rows, ticktick)
+
+    def target_map(rows, ticktick):
+        imported = (tracker_target(row) for row in rows)
         return {
             **settings.targets,
             **{target.slug: target for target in imported},
             **{row["slug"]: Target(row["slug"], row["name"], "issue") for row in ticktick},
         }
+
+    def visible_targets(*groups, slugs=()):
+        wanted = set(settings.targets)
+        wanted.update(slugs)
+        for rows in groups:
+            wanted.update(row["target"] for row in rows)
+        return target_map(*db.target_metadata(wanted))
 
     def get_target(slug: str) -> Target:
         target = settings.targets.get(slug)
@@ -286,7 +298,7 @@ def create_app() -> FastAPI:
             "target": target,
             "partial": partial,
             "completion_prompt": None if partial else completion_prompt(request),
-            "targets": all_targets(),
+            "targets": visible_targets(active, personal, agents, slugs=(*focus, target.slug)),
             "linear_enabled": linear is not None,
             "journal_url": target.url,
             "timezone": settings.timezone.key,
@@ -340,9 +352,11 @@ def create_app() -> FastAPI:
         rows = db.completed_sessions(
             midnight_ms(previous_start, settings.timezone), midnight_ms(end, settings.timezone)
         )
+        report = report_data(period, start, end, today, rows, settings.timezone)
+        active = db.active_timers()
         back_url = "/dashboard" if linear else default_target.url
         return templates.TemplateResponse(request, "statistics.html", {
-            **report_data(period, start, end, today, rows, settings.timezone),
+            **report,
             "page_title": "Статистика",
             "is_statistics": True,
             "period": period,
@@ -353,12 +367,12 @@ def create_app() -> FastAPI:
             "next_url": statistics_url(period, end) if end <= today else None,
             "today_url": statistics_url(period, today) if end <= today else None,
             "linear_enabled": linear is not None,
-            "targets": all_targets(),
+            "targets": visible_targets(active, slugs=(slug for slug, _ in report["tasks"])),
             "journal_url": default_target.url,
             "active_url": back_url + "#active",
             "timezone": settings.timezone.key,
             "csrf": csrf_token(token),
-            "active": db.active_timers(),
+            "active": active,
         })
 
     @app.post("/statistics/login")
@@ -821,7 +835,7 @@ def create_app() -> FastAPI:
         def linear_timer_state(token: str, selection: LinearBrowse, active, focus, rows=None) -> dict:
             return {
                 "active": active,
-                "targets": all_targets(rows),
+                "targets": visible_targets(active, slugs=focus) if rows is None else all_targets(rows),
                 "now": now_ms(),
                 "revision": timer_revision(active) + "." + focus_revision(focus),
                 "focus": focus,

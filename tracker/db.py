@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 from contextlib import closing, contextmanager
@@ -112,6 +113,10 @@ INTERVAL_FIELDS = {
     "paused_ms": "INTEGER",
     "version": "INTEGER NOT NULL DEFAULT 0",
 }
+ACTIVE_TIMER = "ended_ms IS NULL OR overtime_pending = 1"
+ACTIVE_TIMER_INDEX = (
+    f"CREATE INDEX IF NOT EXISTS active_timers_by_target ON intervals (target) WHERE {ACTIVE_TIMER}"
+)
 
 Row = sqlite3.Row | dict
 
@@ -172,6 +177,7 @@ class Database:
                     if name not in existing:
                         postgres_definition = definition.replace("INTEGER", "BIGINT")
                         conn.execute(f"ALTER TABLE intervals ADD COLUMN {name} {postgres_definition}")
+                conn.execute(ACTIVE_TIMER_INDEX)
             return
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600)
@@ -189,6 +195,7 @@ class Database:
             for name, definition in INTERVAL_FIELDS.items():
                 if name not in existing:
                     conn.execute(f"ALTER TABLE intervals ADD COLUMN {name} {definition}")
+            conn.execute(ACTIVE_TIMER_INDEX)
 
     @contextmanager
     def transaction(self, *, write: bool = False):
@@ -249,7 +256,7 @@ class Database:
         if seen:
             return
         active = conn.execute(
-            "SELECT id FROM intervals WHERE target = ? AND (ended_ms IS NULL OR overtime_pending = 1)", (slug,)
+            f"SELECT id FROM intervals WHERE target = ? AND ({ACTIVE_TIMER})", (slug,)
         ).fetchone()
         if active:
             interval_id = active["id"]
@@ -288,6 +295,28 @@ class Database:
         with self.transaction(write=True) as conn:
             self._register_linear_target(conn, target, reference)
 
+    def target_metadata(self, slugs: set[str]) -> tuple[list[Row], list[Row]]:
+        linear_ids = [slug[7:] for slug in slugs if slug.startswith("linear-")]
+        if not slugs:
+            return [], []
+        with self.transaction() as conn:
+            # Bind each set as a single parameter, even for large statistics periods.
+            if self.database_url:
+                match = "= ANY(?)"
+                bind = list
+            else:
+                match = "IN (SELECT value FROM json_each(?))"
+                bind = json.dumps
+            linear = conn.execute(
+                f"SELECT id, kind, name, linear_url FROM linear_targets WHERE id {match} ORDER BY kind DESC, name, id",
+                (bind(linear_ids),),
+            ).fetchall() if linear_ids else []
+            ticktick = conn.execute(
+                f"SELECT slug, name FROM ticktick_targets WHERE slug {match}",
+                (bind(list(slugs)),),
+            ).fetchall()
+            return linear, ticktick
+
     def focus_tasks(self) -> tuple[str, ...]:
         with self.transaction() as conn:
             rows = conn.execute("SELECT target_id FROM focus_tasks ORDER BY added_ms DESC, target_id").fetchall()
@@ -308,7 +337,7 @@ class Database:
     @staticmethod
     def _active_timers(conn: sqlite3.Connection | PostgresConnection) -> list[Row]:
         return conn.execute(
-            "SELECT * FROM intervals WHERE ended_ms IS NULL OR overtime_pending = 1 ORDER BY started_ms, id"
+            f"SELECT * FROM intervals WHERE {ACTIVE_TIMER} ORDER BY started_ms, id"
         ).fetchall()
 
     def active_timers(self) -> list[Row]:
