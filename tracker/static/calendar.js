@@ -242,7 +242,7 @@
       if (syncing || document.hidden || dragging || dialog.open || pending) return;
       syncing = true;
       try {
-        const response = await fetch("/calendar/catalog", { headers: etag ? { "If-None-Match": etag } : {} });
+        const response = await fetch("/calendar/catalog", { headers: etag ? { "X-Catalog-Revision": etag } : {} });
         if (response.status === 304) { feedback.textContent = ""; return; }
         if (!response.ok) throw new Error();
         const fresh = await response.json();
@@ -254,7 +254,7 @@
         fields.target.replaceChildren(...Object.entries(details).map(([slug, item]) => new Option(item.name, slug)));
         renderTasks();
         calendar.querySelectorAll("[data-block]").forEach(labelBlock);
-        etag = response.headers.get("ETag") || "";
+        etag = response.headers.get("X-Catalog-Revision") || "";
         feedback.textContent = "";
       } catch {
         feedback.textContent = "Linear временно недоступен. Повторим обновление автоматически.";

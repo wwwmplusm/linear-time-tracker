@@ -154,3 +154,33 @@ def test_calendar_areas_and_description():
     assert describe("Почитать роман", team="LIFE")["area"] == "reading"
     lesson = describe("Урок с Машей", team="TUT", project="Маша", priority=2, description="Разобрать времена")
     assert (lesson["lesson"], lesson["priority"], lesson["summary"]) == ("Маша", "Высокий", "Разобрать времена")
+
+
+def test_catalog_batches_sources_and_reuses_unchanged_payload(monkeypatch):
+    from types import SimpleNamespace
+    from tracker import calendar_catalog as catalog
+
+    clock = [100]
+    monkeypatch.setattr(catalog, "monotonic", lambda: clock[0])
+    variables_seen = []
+    def fetch(token, query, variables):
+        variables_seen.append(variables.copy())
+        page = {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}
+        data = {}
+        if variables["readIssues"]:
+            data["issues"] = page
+        if variables["readProjects"]:
+            data["projects"] = page
+            if variables["projects"] is None and variables["projectCursor"] is None:
+                data["projects"] = {**page, "pageInfo": {"hasNextPage": True, "endCursor": "p2"}}
+        return data
+
+    monkeypatch.setattr(catalog, "_graphql", fetch)
+    service = catalog.CalendarCatalog(SimpleNamespace(access_token=lambda: "test"))
+    initial = service.load()
+    assert [(v["readIssues"], v["readProjects"]) for v in variables_seen] == [(True, True), (False, True)]
+    assert variables_seen[-1]["projectCursor"] == "p2"
+    assert service.load() is initial and len(variables_seen) == 2
+    clock[0] += 10
+    assert service.load() is initial and len(variables_seen) == 3
+    assert variables_seen[-1]["issues"] == variables_seen[-1]["projects"]

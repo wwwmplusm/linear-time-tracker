@@ -1,3 +1,5 @@
+import hashlib
+import json
 import re
 from datetime import UTC, datetime, timedelta
 from threading import Lock
@@ -36,11 +38,28 @@ def describe(name, *, team="", project="", labels=(), priority=0, description=""
                 summary=" ".join((description or "").split())[:180], identifier=identifier)
 
 
+CATALOG_QUERY = """
+    query TrackerCalendar($issues: IssueFilter!, $projects: ProjectFilter,
+                          $issueCursor: String, $projectCursor: String,
+                          $readIssues: Boolean!, $readProjects: Boolean!) {
+      issues(first: 50, filter: $issues, after: $issueCursor, orderBy: updatedAt) @include(if: $readIssues) {
+        nodes { id identifier title description priority team { key } project { name }
+                state { type } labels(first: 20) { nodes { name } } }
+        pageInfo { hasNextPage endCursor }
+      }
+      projects(first: 50, filter: $projects, after: $projectCursor) @include(if: $readProjects) {
+        nodes { id name description priority teams(first: 10) { nodes { key } } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+"""
+
+
 class CalendarCatalog:
     def __init__(self, linear):
         self.linear = linear
         self.lock = Lock()
-        self.items = {}
+        self.snapshot = None
         self.checked = self.full = float("-inf")
         self.since = None
         self.token = None
@@ -50,24 +69,17 @@ class CalendarCatalog:
         with self.lock:
             now = monotonic()
             if token == self.token and now - self.checked < 8:
-                return self.items
+                return self.snapshot
             full = token != self.token or now - self.full > 300
-            items = {} if full else self.items.copy()
+            items = {} if full else self.snapshot[0].copy()
             since = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
             filters = {"state": {"type": {"nin": ["completed", "canceled"]}}} if full else {
                 "updatedAt": {"gte": self.since}}
-            after = None
-            while True:
-                page = _graphql(token, """
-                    query TrackerCalendarIssues($filter: IssueFilter!, $after: String) {
-                      issues(first: 50, filter: $filter, after: $after, orderBy: updatedAt) {
-                        nodes { id identifier title description priority team { key } project { id name }
-                                state { type } labels(first: 20) { nodes { name } } }
-                        pageInfo { hasNextPage endCursor }
-                      }
-                    }
-                """, {"filter": filters, "after": after})["issues"]
-                for issue in page["nodes"]:
+            variables = dict(issues=filters, projects=None if full else {"updatedAt": {"gte": self.since}},
+                             readIssues=True, readProjects=True, issueCursor=None, projectCursor=None)
+            while variables["readIssues"] or variables["readProjects"]:
+                data = _graphql(token, CATALOG_QUERY, variables)
+                for issue in data.get("issues", {}).get("nodes", ()):
                     slug = "linear-" + issue["id"]
                     if issue["state"]["type"] in {"completed", "canceled"}:
                         items.pop(slug, None)
@@ -76,30 +88,24 @@ class CalendarCatalog:
                         project=(issue["project"] or {}).get("name", ""), priority=issue["priority"],
                         description=issue["description"], identifier=issue["identifier"],
                         labels=[label["name"] for label in issue["labels"]["nodes"]])
-                if not page["pageInfo"]["hasNextPage"]:
-                    break
-                after = page["pageInfo"]["endCursor"]
-            after = None
-            while True:
-                page = _graphql(token, """
-                    query TrackerCalendarProjects($after: String, $filter: ProjectFilter) {
-                      projects(first: 50, after: $after, filter: $filter) {
-                        nodes { id name description priority teams(first: 10) { nodes { key } } }
-                        pageInfo { hasNextPage endCursor }
-                      }
-                    }
-                """, {"after": after, "filter": None if full else {"updatedAt": {"gte": self.since}}})["projects"]
-                for project in page["nodes"]:
+                for project in data.get("projects", {}).get("nodes", ()):
                     keys = [team["key"] for team in project["teams"]["nodes"]]
                     key = next((key for key in keys if key in WORK), next(iter(keys), ""))
                     items["linear-" + project["id"]] = dict(
                         describe(project["name"], team=key, project=project["name"],
                                  description=project["description"], priority=project["priority"] or 0),
                         kind="project")
-                if not page["pageInfo"]["hasNextPage"]:
-                    break
-                after = page["pageInfo"]["endCursor"]
-            self.items, self.token, self.since, self.checked = items, token, since, now
+                for field, flag, cursor in (("issues", "readIssues", "issueCursor"),
+                                            ("projects", "readProjects", "projectCursor")):
+                    if variables[flag]:
+                        info = data[field]["pageInfo"]
+                        variables[flag] = info["hasNextPage"]
+                        variables[cursor] = info["endCursor"]
+            if self.snapshot is None or items != self.snapshot[0]:
+                body = json.dumps(items, ensure_ascii=False, separators=(",", ":")).encode()
+                etag = '"' + hashlib.sha256(body).hexdigest() + '"'
+                self.snapshot = (items, body, etag)
+            self.token, self.since, self.checked = token, since, now
             if full:
                 self.full = now
-            return items
+            return self.snapshot

@@ -13,7 +13,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Path as PathParam, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -419,13 +419,12 @@ def create_app() -> FastAPI:
         if not calendar_catalog:
             return {}
         try:
-            items = calendar_catalog.load()
+            _, body, etag = calendar_catalog.load()
         except LinearError as error:
             raise HTTPException(503, str(error)) from error
-        revision = hashlib.sha256(repr(items).encode()).hexdigest()
-        if request.headers.get("If-None-Match") == '"' + revision + '"':
+        if request.headers.get("X-Catalog-Revision", request.headers.get("If-None-Match")) == etag:
             return Response(status_code=304)
-        return JSONResponse(items, headers={"ETag": '"' + revision + '"'})
+        return Response(body, media_type="application/json", headers={"ETag": etag, "X-Catalog-Revision": etag})
 
     @app.post("/calendar/login")
     def calendar_login(
@@ -453,7 +452,8 @@ def create_app() -> FastAPI:
             if error.status_code != 404 or not calendar_catalog:
                 raise
             try:
-                item = calendar_catalog.load().get(target)
+                items, _, _ = calendar_catalog.load()
+                item = items.get(target)
                 if not item:
                     raise error
                 linear.import_target(item.get("kind", "issue"), target.removeprefix("linear-"))
