@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from threading import Lock
 from time import monotonic
 
@@ -36,6 +37,12 @@ def describe(name, *, team="", project="", labels=(), priority=0, description=""
         lesson = project or "Уроки и занятия"
     return dict(name=name, area=area, project=project, lesson=lesson, priority=PRIORITIES[priority],
                 summary=" ".join((description or "").split())[:180], identifier=identifier)
+
+
+@lru_cache(maxsize=4096)
+def local_description(name, team, kind):
+    item = describe(name, team=team, project=name if kind == "project" else "")
+    return {key: value for key, value in item.items() if value or key == "name"}
 
 
 CATALOG_QUERY = """

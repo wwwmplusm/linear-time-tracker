@@ -19,7 +19,7 @@ from fastapi.templating import Jinja2Templates
 from jinja2.utils import htmlsafe_json_dumps
 from starlette.concurrency import run_in_threadpool
 
-from tracker.calendar_catalog import CalendarCatalog, describe
+from tracker.calendar_catalog import CalendarCatalog, local_description
 from tracker.config import Settings, Target
 from tracker.db import Database, elapsed_ms, now_ms, running_since
 from tracker.linear import LinearBrowse, LinearError, LinearIntegration, LinearSettings, tracker_target
@@ -393,11 +393,8 @@ def create_app() -> FastAPI:
         rows = linear_targets()
         targets = all_targets(rows)
         references = {"linear-" + row["id"]: row["reference"] for row in rows}
-        details = {}
-        for slug, target in targets.items():
-            item = describe(target.name, team=references.get(slug, "").split("-")[0],
-                            project=target.name if target.kind == "project" else "")
-            details[slug] = {key: value for key, value in item.items() if value or key == "name"}
+        details = {slug: local_description(target.name, references.get(slug, "").partition("-")[0], target.kind)
+                   for slug, target in targets.items()}
         focus = db.focus_tasks() if linear else ()
         catalog_json = htmlsafe_json_dumps({
             "items": details,
